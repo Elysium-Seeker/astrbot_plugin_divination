@@ -1,6 +1,6 @@
 # 塔罗插件工作流（当前版本）
 
-本文档描述插件当前已经实现并上线的占卜流程（v0.2.6）。
+本文档描述插件当前已经实现并上线的占卜流程（v0.2.7）。
 
 ## 1. 当前能力概览
 
@@ -74,9 +74,13 @@
 1. pending_expire_seconds
 - 待抽牌会话超时时间（秒）。
 
-2. draw_pool_factor
+2. full_draw_pool
+- 是否强制全牌池（默认 true）。
+- 开启时忽略 draw_pool_factor，直接展示该主题全部可抽牌。
+
+3. draw_pool_factor
 - 编号抽牌池倍率。
-- <=0 时展示全部可抽牌；>0 时按倍率压缩抽牌池。
+- 仅在 full_draw_pool=false 时生效。
 
 3. enable_record
 - 是否启用记录写入与查询。

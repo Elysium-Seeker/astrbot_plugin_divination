@@ -20,6 +20,11 @@
     "default": 600,
     "description": "待抽牌会话超时时间（秒）"
   },
+  "full_draw_pool": {
+    "type": "bool",
+    "default": true,
+    "description": "是否始终展示该主题下全部可抽牌编号。开启后 draw_pool_factor 不生效"
+  },
   "draw_pool_factor": {
     "type": "int",
     "default": 0,
