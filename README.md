@@ -16,16 +16,16 @@ _🔮 赛博塔罗牌 🔮_
 
 ## 版本
 
-- 版本： [v0.2.10](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.10)
+- 版本： [v0.2.11](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.11)
 - 适配：AstrBot v3.4.39
 
 ## 安装
 
 1. 将插件放入 AstrBot 插件目录。
-2. 下载塔罗资源并放到本地目录。
-3. 在插件配置中设置 `resource_path`。
+2. 当前仓库已内置 TouhouTarot 与 BilibiliTarot 资源，可直接使用。
+3. 若使用外部资源目录，在插件配置中设置 `resource_path`。
 
-资源下载： [塔罗资源下载](https://www.123912.com/s/UQZ8Vv-uOLav?)（提取码：`omBT`）
+外部资源下载（可选）： [塔罗资源下载](https://www.123912.com/s/UQZ8Vv-uOLav?)（提取码：`omBT`）
 
 ## 指令速查
 
