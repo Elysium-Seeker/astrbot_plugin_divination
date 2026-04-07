@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import PIL.Image
 from astrbot.api.all import *
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent, filter
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,17 @@ class Tarot:
         if group_id is not None:
             return f"group:{group_id}:user:{user_id}"
         return f"private:user:{user_id}"
+
+    def has_pending_session(self, event: AstrMessageEvent) -> bool:
+        self._cleanup_pending_sessions()
+        session_key = self._build_session_key(event)
+        session = self.pending_sessions.get(session_key)
+        if not session:
+            return False
+        if time.time() - session.get("created_at", 0) > self.pending_expire_seconds:
+            self.pending_sessions.pop(session_key, None)
+            return False
+        return True
 
     def _cleanup_pending_sessions(self):
         now = time.time()
@@ -580,7 +591,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.4")
+@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.5")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -588,15 +599,46 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.4\n"
+            "赛博塔罗牌 v0.2.5\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
+            "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
             "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
             "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
             "[开启/关闭群聊转发] 切换群聊转发模式"
         )
+
+    def _extract_message_text(self, event: AstrMessageEvent, fallback_text: str = "") -> str:
+        if (fallback_text or "").strip():
+            return fallback_text.strip()
+
+        event_attrs = ["message_str", "raw_message", "text", "message_text"]
+        for attr in event_attrs:
+            value = getattr(event, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            for attr in ("message_str", "raw_message", "text", "message"):
+                value = getattr(message_obj, attr, None)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        getter_names = ["get_message_str", "get_plain_text", "get_message_text", "get_raw_message", "get_message"]
+        for getter_name in getter_names:
+            getter = getattr(event, getter_name, None)
+            if callable(getter):
+                try:
+                    value = getter()
+                except Exception:
+                    continue
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return ""
 
     @command("tarot")
     async def tarot_handler(self, event: AstrMessageEvent, text: str = ""):
@@ -640,6 +682,21 @@ class TarotPlugin(Star):
         except Exception as e:
             logger.error("处理抽牌命令失败: %s", str(e))
             yield event.plain_result(f"抽牌命令执行失败: {str(e)}")
+
+    @filter.regex(r"^\s*\d+(?:[\s,，]+\d+)*\s*$")
+    async def draw_by_reply_handler(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            if not self.tarot.has_pending_session(event):
+                return
+            message_text = self._extract_message_text(event, text)
+            if not message_text:
+                return
+            async for result in self.tarot.draw_by_numbers(event, message_text):
+                yield result
+            event.stop_event()
+        except Exception as e:
+            logger.error("处理编号直回抽牌失败: %s", str(e))
+            yield event.plain_result(f"编号直回抽牌失败: {str(e)}")
 
     @command("占卜记录")
     async def records_handler(self, event: AstrMessageEvent, text: str = ""):
