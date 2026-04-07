@@ -1,3 +1,5 @@
 httpx>=0.23.0
 pillow>=9.2.0
 python-multipart>=0.0.5
+playwright>=1.40.0
+markdown>=3.6

@@ -14,6 +14,8 @@ import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
 from astrbot.api.all import *
+import markdown
+from playwright.async_api import async_playwright
 from astrbot.api.event import AstrMessageEvent, filter
 
 logger = logging.getLogger(__name__)
@@ -181,76 +183,6 @@ class Tarot:
         numbers = [str(i) for i in range(1, pool_size + 1)]
         return "\n".join(" ".join(numbers[i:i + 10]) for i in range(0, len(numbers), 10))
 
-    @staticmethod
-    def _strip_inline_markdown(text: str) -> str:
-        cleaned = text or ""
-        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
-        cleaned = re.sub(r"\*(.*?)\*", r"\1", cleaned)
-        cleaned = re.sub(r"_{1,2}(.*?)_{1,2}", r"\1", cleaned)
-        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
-        cleaned = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned)
-        return cleaned.strip()
-
-    @staticmethod
-    def _normalize_markdown_text(text: str) -> str:
-        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-        normalized = "".join(ch for ch in normalized if ch == "\n" or ch == "\t" or ord(ch) >= 32)
-        return normalized.strip()
-
-    def _load_font(self, size: int, bold: bool = False):
-        candidates: List[str] = []
-        if self.markdown_card_font_path:
-            candidates.append(self.markdown_card_font_path)
-
-        if os.name == "nt":
-            candidates.extend(
-                [
-                    "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
-                    "C:/Windows/Fonts/msyh.ttc",
-                    "C:/Windows/Fonts/simhei.ttf",
-                    "C:/Windows/Fonts/simsun.ttc",
-                ]
-            )
-        else:
-            candidates.extend(
-                [
-                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-                    "/usr/share/fonts/truetype/arphic/ukai.ttc",
-                ]
-            )
-
-        for path in candidates:
-            try:
-                if Path(path).exists():
-                    return PIL.ImageFont.truetype(path, size=size)
-            except Exception:
-                continue
-        return None
-
-    def _wrap_text_lines(self, draw: Any, text: str, font: Any, max_width: int) -> List[str]:
-        if not text:
-            return [""]
-        lines: List[str] = []
-        current = ""
-        for ch in text:
-            candidate = current + ch
-            bbox = draw.textbbox((0, 0), candidate, font=font)
-            if bbox[2] - bbox[0] <= max_width:
-                current = candidate
-                continue
-            if current:
-                lines.append(current)
-                current = ch
-            else:
-                lines.append(candidate)
-                current = ""
-        if current:
-            lines.append(current)
-        return lines or [""]
-
     def _build_interpretation_markdown(
         self,
         question: str,
@@ -281,10 +213,86 @@ class Tarot:
             lines.extend(content_lines)
         return "\n".join(lines)
 
-    def _render_markdown_card(self, markdown_text: str) -> Optional[str]:
+    async def _render_markdown_card(self, markdown_text: str) -> Optional[str]:
+        if not self.enable_markdown_card:
+            return None
+
+        markdown_text = self._normalize_markdown_text(markdown_text)
+        if not markdown_text:
+            return None
+        
         try:
-            if not self.enable_markdown_card:
-                return None
+            html_content = markdown.markdown(markdown_text)
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset='utf-8'>
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap');
+                    body {{
+                        font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+                        background-color: #f7f0e0;
+                        color: #3d311c;
+                        padding: 40px;
+                        margin: 0;
+                        width: 800px;
+                    }}
+                    .card {{
+                        background: linear-gradient(135deg, #FFFAF0 0%, #F5DEB3 100%);
+                        border: 2px solid #D4AF37;
+                        border-radius: 20px;
+                        padding: 40px;
+                        box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+                    }}
+                    h1, h2 {{
+                        color: #8B4513;
+                        border-bottom: 2px solid #DEB887;
+                        padding-bottom: 10px;
+                    }}
+                    ul {{
+                        list-style-type: none;
+                        padding: 0;
+                    }}
+                    li {{
+                        margin-bottom: 8px;
+                        line-height: 1.6;
+                    }}
+                    li::before {{
+                        content: '✨ ';
+                    }}
+                </style>
+            </head>
+            <body id="body">
+                <div class="card" id="card">
+                    {html_content}
+                </div>
+            </body>
+            </html>
+            """
+            
+            card_dir = self.data_dir / "analysis_cards"
+            os.makedirs(card_dir, exist_ok=True)
+            card_path = card_dir / f"reading_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.set_content(html, wait_until='networkidle')
+                await page.evaluate('document.fonts.ready')
+                
+                card_element = await page.query_selector('.card')
+                if card_element:
+                    await card_element.screenshot(path=str(card_path))
+                else:
+                    await page.screenshot(path=str(card_path), full_page=True)
+                await browser.close()
+
+            return str(card_path.resolve())
+        except Exception as e:
+            logger.error("Markdown Playwright 渲染失败: %s。可能是未安装浏览器，遇到此问题请运行 'playwright install chromium'", str(e))
+            raise e
 
             markdown_text = self._normalize_markdown_text(markdown_text)
             if not markdown_text:
@@ -714,7 +722,7 @@ class Tarot:
                 record_cards=record_cards,
                 interpretation=interpretation,
             )
-            analysis_card_path = self._render_markdown_card(analysis_markdown)
+            analysis_card_path = await self._render_markdown_card(analysis_markdown)
             if self.include_ai_in_chain:
                 if analysis_card_path:
                     chain.nodes.append(
@@ -778,7 +786,7 @@ class Tarot:
                 record_cards=record_cards,
                 interpretation=interpretation,
             )
-            analysis_card_path = self._render_markdown_card(analysis_markdown)
+            analysis_card_path = await self._render_markdown_card(analysis_markdown)
             if analysis_card_path:
                 yield event.chain_result(
                     [
@@ -897,7 +905,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.14")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.15")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -905,7 +913,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.14\n"
+            "赛博塔罗牌 v0.2.15\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
