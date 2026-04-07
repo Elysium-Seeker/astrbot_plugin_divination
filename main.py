@@ -5,11 +5,14 @@ import os
 import random
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import PIL.Image
+import PIL.ImageDraw
+import PIL.ImageFont
 from astrbot.api.all import *
 from astrbot.api.event import AstrMessageEvent, filter
 
@@ -27,6 +30,8 @@ class Tarot:
         self.enable_record: bool = config.get("enable_record", True)
         self.full_draw_pool: bool = config.get("full_draw_pool", True)
         self.draw_pool_factor: int = max(0, int(config.get("draw_pool_factor", 0)))
+        raw_force_theme = config.get("force_theme", "BilibiliTarot")
+        self.force_theme: str = str(raw_force_theme).strip() if raw_force_theme is not None else ""
         self.pending_sessions: Dict[str, Dict[str, Any]] = {}
         self.record_lock = asyncio.Lock()
         self.data_dir: Path = self._resolve_data_dir(context)
@@ -38,12 +43,13 @@ class Tarot:
             logger.error("tarot.json 文件缺失，请确保资源完整！")
             raise Exception("tarot.json 文件缺失，请确保资源完整！")
         logger.info(
-            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s",
+            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s, 强制主题: %s",
             self.resource_path,
             self.include_ai_in_chain,
             self.enable_record,
             self.full_draw_pool,
             self.draw_pool_factor,
+            self.force_theme or "<随机>",
         )
 
     def _resolve_data_dir(self, context: Context) -> Path:
@@ -120,6 +126,17 @@ class Tarot:
         if not sub_themes_dir:
             logger.error("本地塔罗牌主题为空，请检查资源目录！")
             raise Exception("本地塔罗牌主题为空，请检查资源目录！")
+
+        if self.force_theme:
+            matched_theme = {name.lower(): name for name in sub_themes_dir}.get(self.force_theme.lower())
+            if matched_theme:
+                return matched_theme
+            logger.warning(
+                "force_theme=%s 不存在，可用主题: %s。将回退为随机主题。",
+                self.force_theme,
+                ", ".join(sub_themes_dir),
+            )
+
         return random.choice(sub_themes_dir)
 
     def pick_sub_types(self, theme: str) -> List[str]:
@@ -166,6 +183,207 @@ class Tarot:
         action = "可以主动推进" if is_upright else "建议先观察与调整"
         return f"单牌解读：围绕“{focus}”，在「{position}」位出现的{card_info.get('name_cn', '未知牌')}{orientation}提示你{action}，关键词：{meaning}"
 
+    @staticmethod
+    def _strip_inline_markdown(text: str) -> str:
+        cleaned = text or ""
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*(.*?)\*", r"\1", cleaned)
+        cleaned = re.sub(r"_{1,2}(.*?)_{1,2}", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+        cleaned = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _load_font(size: int, bold: bool = False):
+        if os.name == "nt":
+            candidates = [
+                "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+                "C:/Windows/Fonts/simhei.ttf",
+                "C:/Windows/Fonts/simsun.ttc",
+            ]
+        else:
+            candidates = [
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]
+
+        for path in candidates:
+            try:
+                if Path(path).exists():
+                    return PIL.ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+        return PIL.ImageFont.load_default()
+
+    def _wrap_text_lines(self, draw: Any, text: str, font: Any, max_width: int) -> List[str]:
+        if not text:
+            return [""]
+        lines: List[str] = []
+        current = ""
+        for ch in text:
+            candidate = current + ch
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = ch
+            else:
+                lines.append(candidate)
+                current = ""
+        if current:
+            lines.append(current)
+        return lines or [""]
+
+    def _build_interpretation_markdown(
+        self,
+        question: str,
+        formation_name: str,
+        record_cards: List[Dict[str, Any]],
+        interpretation: str,
+    ) -> str:
+        lines = [
+            "# 塔罗占卜分析卡",
+            "## 问题",
+            f"- {question}",
+            "## 牌阵",
+            f"- {formation_name}",
+            "## 牌面概览",
+        ]
+        for card in record_cards:
+            lines.append(
+                f"- {card.get('position', '位置')}：{card.get('name', '未知牌')}{card.get('orientation', '')} · {card.get('meaning', '')}"
+            )
+
+        lines.append("---")
+        lines.append("## 深度解读")
+        content_lines = [line.strip() for line in (interpretation or "").splitlines() if line.strip()]
+        if not content_lines:
+            lines.append("- 暂无解读。")
+        else:
+            lines.extend(content_lines)
+        return "\n".join(lines)
+
+    def _render_markdown_card(self, markdown_text: str) -> Optional[str]:
+        try:
+            width = 1080
+            outer_padding = 36
+            panel_padding = 40
+            max_text_width = width - (outer_padding * 2) - (panel_padding * 2)
+
+            font_h1 = self._load_font(46, bold=True)
+            font_h2 = self._load_font(34, bold=True)
+            font_body = self._load_font(28, bold=False)
+            font_meta = self._load_font(24, bold=False)
+
+            measure = PIL.Image.new("RGB", (width, 16), (0, 0, 0))
+            measure_draw = PIL.ImageDraw.Draw(measure)
+
+            layout_items: List[Dict[str, Any]] = []
+            content_height = 0
+            for raw in markdown_text.splitlines():
+                line = raw.strip()
+                if not line:
+                    content_height += 12
+                    layout_items.append({"kind": "blank", "height": 12})
+                    continue
+
+                if line == "---":
+                    content_height += 26
+                    layout_items.append({"kind": "divider", "height": 26})
+                    continue
+
+                prefix = ""
+                font = font_body
+                color = (58, 46, 28)
+                line_gap = 12
+                text = line
+                if line.startswith("# "):
+                    text = line[2:].strip()
+                    font = font_h1
+                    color = (75, 45, 12)
+                    line_gap = 18
+                elif line.startswith("## "):
+                    text = line[3:].strip()
+                    font = font_h2
+                    color = (92, 56, 18)
+                    line_gap = 14
+                elif line.startswith("- "):
+                    text = line[2:].strip()
+                    prefix = "• "
+                    font = font_meta
+                    color = (64, 52, 32)
+
+                clean_text = self._strip_inline_markdown(text)
+                wrapped = self._wrap_text_lines(
+                    measure_draw,
+                    clean_text,
+                    font,
+                    max_text_width - (20 if prefix else 0),
+                )
+                line_height = max(font.size + 8, 28)
+                for idx, wrapped_line in enumerate(wrapped):
+                    output = (prefix if idx == 0 else "  ") + wrapped_line if prefix else wrapped_line
+                    content_height += line_height
+                    layout_items.append(
+                        {
+                            "kind": "text",
+                            "text": output,
+                            "font": font,
+                            "color": color,
+                            "height": line_height,
+                        }
+                    )
+                content_height += line_gap
+
+            height = max(720, content_height + (outer_padding * 2) + (panel_padding * 2))
+
+            img = PIL.Image.new("RGB", (width, height), (20, 22, 38))
+            draw = PIL.ImageDraw.Draw(img)
+            for y in range(height):
+                ratio = y / max(1, height - 1)
+                r = int(20 + (44 - 20) * ratio)
+                g = int(22 + (30 - 22) * ratio)
+                b = int(38 + (60 - 38) * ratio)
+                draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+            panel = (outer_padding, outer_padding, width - outer_padding, height - outer_padding)
+            draw.rounded_rectangle(panel, radius=28, fill=(247, 240, 224), outline=(204, 170, 120), width=3)
+
+            star_points = [
+                (outer_padding + 18, outer_padding + 18),
+                (width - outer_padding - 24, outer_padding + 18),
+                (outer_padding + 18, height - outer_padding - 24),
+                (width - outer_padding - 24, height - outer_padding - 24),
+            ]
+            for x, y in star_points:
+                draw.ellipse((x, y, x + 6, y + 6), fill=(219, 183, 118))
+
+            x = outer_padding + panel_padding
+            y = outer_padding + panel_padding
+            for item in layout_items:
+                if item["kind"] == "blank":
+                    y += item["height"]
+                    continue
+                if item["kind"] == "divider":
+                    y += 8
+                    draw.line((x, y, width - outer_padding - panel_padding, y), fill=(190, 158, 112), width=2)
+                    y += item["height"] - 8
+                    continue
+                draw.text((x, y), item["text"], font=item["font"], fill=item["color"])
+                y += item["height"]
+
+            card_dir = self.data_dir / "analysis_cards"
+            os.makedirs(card_dir, exist_ok=True)
+            card_path = card_dir / f"reading_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+            img.save(card_path, format="PNG")
+            return str(card_path.resolve())
+        except Exception as e:
+            logger.error("Markdown 占卜卡片渲染失败: %s", str(e))
+            return None
+
     async def _append_record(self, record: Dict[str, Any]):
         if not self.enable_record:
             return
@@ -188,6 +406,7 @@ class Tarot:
     def _build_draw_prompt(
         self,
         formation_name: str,
+        theme_name: str,
         cards_num: int,
         pool_size: int,
         representations: List[str],
@@ -199,6 +418,7 @@ class Tarot:
         cut_text = "本次包含切牌位。" if is_cut else "本次不包含切牌位。"
         return (
             f"牌阵已确定：{formation_name}（{mode_text}，需抽 {cards_num} 张）\n"
+            f"当前牌组主题：{theme_name}\n"
             f"位置含义：{rep_text}\n"
             f"{cut_text}\n"
             "请从下方编号中选择你要抽取的牌。\n"
@@ -305,7 +525,14 @@ class Tarot:
             position = f"第{i+1}张牌「{rep}」"
             card_text = f"「{card['name_cn']}{'正位' if is_upright else '逆位'}」「{card['meaning']['up' if is_upright else 'down']}」"
             prompt += f"{position}: {card_text}\n"
-        prompt += f"\n请结合用户指令（'{user_input}'），分析牌阵的含义和每张牌的具体位置，提供一个连贯的解析，解释这些牌可能对用户的生活、情感或决策的启示。回答需简洁但有深度，约200-300字，重点突出用户输入的主题（如{user_input}）。同时请确保解析结果整洁、可阅读性强，善用换行与颜表情（如😊、✨、🌟等）进行美化。"
+        prompt += (
+            f"\n请结合用户指令（'{user_input}'），分析牌阵的含义和每张牌的具体位置，提供一个连贯且可执行的解析。"
+            "请用 Markdown 输出，结构至少包含：\n"
+            "## 核心结论\n"
+            "## 位置解读\n"
+            "## 行动建议\n"
+            "每个小节 2-4 条要点，语气温和、具体，避免空话。"
+        )
         try:
             llm_response = await self.context.get_using_provider().text_chat(
                 prompt=prompt,
@@ -372,6 +599,7 @@ class Tarot:
             yield event.plain_result(
                 self._build_draw_prompt(
                     formation_name=session["formation_name"],
+                    theme_name=session["theme"],
                     cards_num=session["cards_num"],
                     pool_size=session["pool_size"],
                     representations=session["representations"],
@@ -392,6 +620,7 @@ class Tarot:
             yield event.plain_result(
                 self._build_draw_prompt(
                     formation_name=session["formation_name"],
+                    theme_name=session["theme"],
                     cards_num=session["cards_num"],
                     pool_size=session["pool_size"],
                     representations=session["representations"],
@@ -420,6 +649,7 @@ class Tarot:
 
         is_upright_list: List[bool] = []
         record_cards: List[Dict[str, Any]] = []
+        analysis_markdown = ""
         group_id = self._safe_event_call(event, "get_group_id")
         is_group_chat = group_id is not None
 
@@ -451,20 +681,47 @@ class Tarot:
             interpretation = await self._generate_ai_interpretation(
                 formation_name, selected_cards, representations, is_upright_list, question
             )
+            analysis_markdown = self._build_interpretation_markdown(
+                question=question,
+                formation_name=formation_name,
+                record_cards=record_cards,
+                interpretation=interpretation,
+            )
+            analysis_card_path = self._render_markdown_card(analysis_markdown)
             if self.include_ai_in_chain:
-                chain.nodes.append(
-                    Node(
-                        uin=event.get_self_id(),
-                        name=bot_name,
-                        content=[Plain(f"\n“属于你的占卜分析！”\n{interpretation}")],
+                if analysis_card_path:
+                    chain.nodes.append(
+                        Node(
+                            uin=event.get_self_id(),
+                            name=bot_name,
+                            content=[
+                                Plain("\n“属于你的占卜分析卡片（Markdown）”"),
+                                Image.fromFileSystem(analysis_card_path),
+                            ],
+                        )
                     )
-                )
+                else:
+                    chain.nodes.append(
+                        Node(
+                            uin=event.get_self_id(),
+                            name=bot_name,
+                            content=[Plain(f"\n“属于你的占卜分析！”\n{interpretation}")],
+                        )
+                    )
             if not chain.nodes:
                 yield event.plain_result("无法生成塔罗牌结果，请稍后重试")
                 return
             yield event.chain_result([chain])
             if not self.include_ai_in_chain:
-                yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+                if analysis_card_path:
+                    yield event.chain_result(
+                        [
+                            Plain("\n“属于你的占卜分析卡片（Markdown）”"),
+                            Image.fromFileSystem(analysis_card_path),
+                        ]
+                    )
+                else:
+                    yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
         else:
             for i in range(cards_num):
                 position = representations[i]
@@ -489,7 +746,22 @@ class Tarot:
             interpretation = await self._generate_ai_interpretation(
                 formation_name, selected_cards, representations, is_upright_list, question
             )
-            yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+            analysis_markdown = self._build_interpretation_markdown(
+                question=question,
+                formation_name=formation_name,
+                record_cards=record_cards,
+                interpretation=interpretation,
+            )
+            analysis_card_path = self._render_markdown_card(analysis_markdown)
+            if analysis_card_path:
+                yield event.chain_result(
+                    [
+                        Plain("\n“属于你的占卜分析卡片（Markdown）”"),
+                        Image.fromFileSystem(analysis_card_path),
+                    ]
+                )
+            else:
+                yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
 
         await self._append_record(
             {
@@ -503,6 +775,7 @@ class Tarot:
                 "selected_numbers": selected_numbers,
                 "cards": record_cards,
                 "overall_interpretation": interpretation,
+                "overall_interpretation_markdown": analysis_markdown,
             }
         )
 
@@ -598,7 +871,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.11")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.12")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -606,12 +879,14 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.11\n"
+            "赛博塔罗牌 v0.2.12\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
+            "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
             "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
             "[编号规则] 编号从 1 开始，不存在 0 号牌\n"
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
+            "[分析输出] 整体解读将渲染为 Markdown 风格占卜卡片\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"

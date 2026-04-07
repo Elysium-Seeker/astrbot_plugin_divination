@@ -1,6 +1,6 @@
 name: astrbot_plugin_tarot
-desc: "AstrBot 塔罗占卜插件：先提问后编号抽牌，支持单牌/整体解读、自动抽牌与记录查询。"
-help: "[/tarot 问题] 多牌占卜；[/tarot] 仅返回提问引导；[塔罗牌 问题] 单张占卜；[抽牌 编号...] 抽牌命令（编号从 1 开始，不存在 0 号牌）；有待抽牌会话时可直接回复编号自动抽牌；纯数字被分流时可用 [/tarot 编号...] 兜底；[占卜记录 数量] 查看历史；[开启/关闭群聊转发] 切换群聊转发模式。"
-version: v0.2.11
+desc: "AstrBot 塔罗占卜插件：默认强制 BilibiliTarot，支持编号抽牌、Markdown 占卜卡片与记录查询。"
+help: "[/tarot 问题] 多牌占卜；[/tarot] 仅返回提问引导；默认 force_theme=BilibiliTarot（可配置留空为随机）；[塔罗牌 问题] 单张占卜；[抽牌 编号...] 抽牌命令（编号从 1 开始，不存在 0 号牌）；有待抽牌会话时可直接回复编号自动抽牌；纯数字被分流时可用 [/tarot 编号...] 兜底；整体解读将渲染为 Markdown 风格占卜卡片；[占卜记录 数量] 查看历史；[开启/关闭群聊转发] 切换群聊转发模式。"
+version: v0.2.12
 author: Elysium-Seeker
 repo: https://github.com/Elysium-Seeker/astrbot_plugin_tarot

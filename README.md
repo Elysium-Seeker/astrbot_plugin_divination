@@ -10,13 +10,15 @@ _🔮 赛博塔罗牌 🔮_
 
 - `/tarot 问题` 多牌占卜（提问 -> 选阵 -> 编号抽牌 -> 单牌+整体解读）。
 - `塔罗牌 问题` 单张占卜。
+- 默认强制主题为 `BilibiliTarot`（可通过 `force_theme` 配置修改，留空则随机）。
 - 支持三种抽牌输入：直回编号、`抽牌 ...`、`/tarot 编号...` 兜底。
+- 整体解读输出为 Markdown 风格占卜分析卡片（参考 pillowmd 样式）。
 - 默认全牌池抽牌（`full_draw_pool=true`）。
 - 支持占卜记录查询与群聊转发开关。
 
 ## 版本
 
-- 版本： [v0.2.11](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.11)
+- 版本： [v0.2.12](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.12)
 - 适配：AstrBot v3.4.39
 
 ## 安装
@@ -24,6 +26,7 @@ _🔮 赛博塔罗牌 🔮_
 1. 将插件放入 AstrBot 插件目录。
 2. 当前仓库已内置 TouhouTarot 与 BilibiliTarot 资源，可直接使用。
 3. 若使用外部资源目录，在插件配置中设置 `resource_path`。
+4. 若需切回随机主题，将 `force_theme` 设为空字符串。
 
 外部资源下载（可选）： [塔罗资源下载](https://www.123912.com/s/UQZ8Vv-uOLav?)（提取码：`omBT`）
 

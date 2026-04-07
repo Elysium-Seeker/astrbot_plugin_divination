@@ -10,6 +10,11 @@
     "hint": "目录中仅包含初始资源。扩展资源请自行下载，并添加到对应目录中。塔罗资源：https://www.123912.com/s/UQZ8Vv-uOLav? 提取码:omBT",
     "description": "塔罗牌图片资源目录路径，相对于插件根目录"
   },
+  "force_theme": {
+    "type": "string",
+    "default": "BilibiliTarot",
+    "description": "强制使用的塔罗主题目录名。留空则随机主题"
+  },
   "include_ai_in_chain": {
     "type": "bool",
     "default": true,
