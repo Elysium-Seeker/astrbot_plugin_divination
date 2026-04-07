@@ -574,44 +574,48 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.1")
+@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.2")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.tarot = Tarot(context, config)
 
-    @command("占卜")
-    async def divine_handler(self, event: AstrMessageEvent, text: str = ""):
+    def _help_message(self) -> str:
+        return (
+            "赛博塔罗牌 v0.2.2\n"
+            "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
+            "[/tarot] 不带问题时会引导你先提问\n"
+            "[塔罗牌 问题] 进入单张抽牌流程\n"
+            "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
+            "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
+            "[开启/关闭群聊转发] 切换群聊转发模式"
+        )
+
+    @command("tarot")
+    async def tarot_handler(self, event: AstrMessageEvent, text: str = ""):
         try:
-            if "帮助" in text:
+            user_text = (text or "").strip()
+            if not user_text:
                 yield event.plain_result(
-                    "赛博塔罗牌 v0.2.1\n"
-                    "[占卜 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
-                    "[塔罗牌 问题] 进入单张抽牌流程\n"
-                    "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
-                    "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
-                    "[开启/关闭群聊转发] 切换群聊转发模式"
+                    "请先告诉我你的问题，再进行占卜。\n"
+                    "示例：/tarot 我目前的感情状况如何？\n"
+                    "建议使用具体、开放式的问题。"
                 )
+            elif user_text in {"帮助", "help", "Help", "HELP"}:
+                yield event.plain_result(self._help_message())
             else:
-                async for result in self.tarot.divine(event, text):
+                async for result in self.tarot.divine(event, user_text):
                     yield result
             event.stop_event()
         except Exception as e:
-            logger.error(f"处理占卜命令失败: {str(e)}")
-            yield event.plain_result(f"占卜命令执行失败: {str(e)}")
+            logger.error(f"处理 /tarot 命令失败: {str(e)}")
+            yield event.plain_result(f"/tarot 命令执行失败: {str(e)}")
 
     @command("塔罗牌")
     async def onetime_divine_handler(self, event: AstrMessageEvent, text: str = ""):
         try:
-            if "帮助" in text:
-                yield event.plain_result(
-                    "赛博塔罗牌 v0.2.1\n"
-                    "[占卜 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
-                    "[塔罗牌 问题] 进入单张抽牌流程\n"
-                    "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
-                    "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
-                    "[开启/关闭群聊转发] 切换群聊转发模式"
-                )
+            if (text or "").strip() in {"帮助", "help", "Help", "HELP"}:
+                yield event.plain_result(self._help_message())
             else:
                 async for result in self.tarot.onetime_divine(event, text):
                     yield result
