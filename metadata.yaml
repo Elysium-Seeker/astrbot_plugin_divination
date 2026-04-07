@@ -1,6 +1,6 @@
 name: astrbot_plugin_tarot
 desc: "一个基于 AstrBot 框架的塔罗牌占卜插件，支持先提问后编号抽牌，提供单牌与整体解读并记录历史。"
 help: "[/tarot 问题] 启动多牌占卜流程（洗牌、匹配牌阵、编号抽牌）。[/tarot] 不带问题时引导用户先提问。[塔罗牌 问题] 启动单张抽牌流程。[抽牌 编号...] 根据提示输入编号完成翻牌与解读。[占卜记录 数量] 查看你的历史占卜记录。[开启/关闭群聊转发] 切换群聊转发模式。"
-version: v0.2.2
+version: v0.2.3
 author: XziXmn
-repo: https://github.com/XziXmn/astrbot_plugin_tarot
+repo: https://github.com/Elysium-Seeker/astrbot_plugin_tarot

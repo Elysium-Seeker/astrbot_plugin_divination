@@ -574,7 +574,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.2")
+@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.3")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -582,7 +582,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.2\n"
+            "赛博塔罗牌 v0.2.3\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
