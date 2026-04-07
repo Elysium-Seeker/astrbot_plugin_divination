@@ -224,7 +224,7 @@ class Tarot:
         try:
             html_content = markdown.markdown(markdown_text)
             
-html = f"""
+            html = f"""
             <!DOCTYPE html>
             <html>
             <head>
@@ -329,7 +329,7 @@ html = f"""
                 await page.set_content(html, wait_until='networkidle')
                 await page.evaluate('document.fonts.ready')
                 
-                card_element = await page.query_selector('.card')
+                card_element = await page.query_selector('.tarot-card')
                 if card_element:
                     await card_element.screenshot(path=str(card_path))
                 else:
