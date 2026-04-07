@@ -22,8 +22,8 @@
   },
   "draw_pool_factor": {
     "type": "int",
-    "default": 3,
-    "description": "编号抽牌池扩容倍数，最终池大小约为抽牌数量的该倍数"
+    "default": 0,
+    "description": "编号抽牌池倍率。<=0 时展示全部可抽牌；>0 时池大小约为抽牌数量的该倍数"
   },
   "enable_record": {
     "type": "bool",

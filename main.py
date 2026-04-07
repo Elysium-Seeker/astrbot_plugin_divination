@@ -25,7 +25,7 @@ class Tarot:
         self.include_ai_in_chain: bool = config.get("include_ai_in_chain", True)
         self.pending_expire_seconds: int = int(config.get("pending_expire_seconds", 600))
         self.enable_record: bool = config.get("enable_record", True)
-        self.draw_pool_factor: int = max(2, int(config.get("draw_pool_factor", 3)))
+        self.draw_pool_factor: int = max(0, int(config.get("draw_pool_factor", 0)))
         self.pending_sessions: Dict[str, Dict[str, Any]] = {}
         self.record_lock = asyncio.Lock()
         self.data_dir: Path = self._resolve_data_dir(context)
@@ -37,10 +37,11 @@ class Tarot:
             logger.error("tarot.json 文件缺失，请确保资源完整！")
             raise Exception("tarot.json 文件缺失，请确保资源完整！")
         logger.info(
-            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s",
+            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 抽牌池倍率: %s",
             self.resource_path,
             self.include_ai_in_chain,
             self.enable_record,
+            self.draw_pool_factor,
         )
 
     def _resolve_data_dir(self, context: Context) -> Path:
@@ -127,7 +128,12 @@ class Tarot:
         candidates = self._all_candidate_cards(all_cards, theme)
         if len(candidates) < cards_num:
             raise Exception(f"主题 {theme} 的牌数量不足，需要 {cards_num} 张")
-        pool_size = min(len(candidates), max(cards_num + 2, cards_num * self.draw_pool_factor))
+
+        # 默认展示全部可抽牌，只有配置了正倍率时才缩小抽牌池。
+        if self.draw_pool_factor <= 0:
+            pool_size = len(candidates)
+        else:
+            pool_size = min(len(candidates), max(cards_num + 2, cards_num * self.draw_pool_factor))
         return random.sample(candidates, pool_size)
 
     def _normalize_representations(self, representations: List[str], cards_num: int) -> List[str]:
@@ -574,7 +580,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.3")
+@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.4")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -582,9 +588,10 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.3\n"
+            "赛博塔罗牌 v0.2.4\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
+            "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
             "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
             "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
