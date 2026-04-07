@@ -593,7 +593,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.7")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.8")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -601,17 +601,22 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.7\n"
+            "赛博塔罗牌 v0.2.8\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
+            "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
             "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
             "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
             "[开启/关闭群聊转发] 切换群聊转发模式"
         )
+
+    @staticmethod
+    def _is_draw_numbers_message(text: str) -> bool:
+        return bool(re.match(r"^\s*\d+(?:[\s,，]+\d+)*\s*$", text or ""))
 
     def _extract_message_text(self, event: AstrMessageEvent, fallback_text: str = "") -> str:
         if (fallback_text or "").strip():
@@ -647,6 +652,18 @@ class TarotPlugin(Star):
     async def tarot_handler(self, event: AstrMessageEvent, text: str = ""):
         try:
             user_text = (text or "").strip()
+
+            if self._is_draw_numbers_message(user_text):
+                if self.tarot.has_pending_session(event):
+                    async for result in self.tarot.draw_by_numbers(event, user_text):
+                        yield result
+                else:
+                    yield event.plain_result(
+                        "当前没有待抽牌会话，请先发送 /tarot 你的问题 发起占卜。"
+                    )
+                event.stop_event()
+                return
+
             if not user_text:
                 yield event.plain_result(
                     "请先告诉我你的问题，再进行占卜。\n"
