@@ -202,6 +202,7 @@ class Tarot:
             f"位置含义：{rep_text}\n"
             f"{cut_text}\n"
             "请从下方编号中选择你要抽取的牌。\n"
+            "注意：编号从 1 开始，不存在 0 号牌。\n"
             "输入方式：\n"
             "1) 直接回复编号（推荐）\n"
             "2) 抽牌 编号1 编号2 ...\n"
@@ -597,7 +598,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.9")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.10")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -605,10 +606,11 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.9\n"
+            "赛博塔罗牌 v0.2.10\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
+            "[编号规则] 编号从 1 开始，不存在 0 号牌\n"
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"

@@ -16,7 +16,7 @@ _🔮 赛博塔罗牌 🔮_
 
 ## 版本
 
-- 版本： [v0.2.9](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.9)
+- 版本： [v0.2.10](https://github.com/Elysium-Seeker/astrbot_plugin_tarot/releases/tag/v0.2.10)
 - 适配：AstrBot v3.4.39
 
 ## 安装
@@ -32,7 +32,7 @@ _🔮 赛博塔罗牌 🔮_
 1. `/tarot 问题`：发起多牌占卜。
 2. `/tarot`：不带问题时返回提问引导。
 3. `塔罗牌 问题`：发起单张占卜。
-4. `抽牌 编号1 编号2 ...`：按提示抽牌。
+4. `抽牌 编号1 编号2 ...`：按提示抽牌（编号从 1 开始，不存在 0 号牌）。
 5. 直接回复编号（如 `1 5 9`）：有待抽牌会话时自动抽牌。
 6. `/tarot 1 5 9`：纯数字被分流时的命令兜底。
 7. `占卜记录 数量`：查看最近记录（默认 3，最多 10）。
