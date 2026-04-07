@@ -176,13 +176,6 @@ class Tarot:
         numbers = [str(i) for i in range(1, pool_size + 1)]
         return "\n".join(" ".join(numbers[i:i + 10]) for i in range(0, len(numbers), 10))
 
-    def _single_card_tip(self, card_info: Dict[str, Any], position: str, is_upright: bool, user_input: str) -> str:
-        focus = user_input or "当前议题"
-        orientation = "正位" if is_upright else "逆位"
-        meaning = card_info.get("meaning", {}).get("up" if is_upright else "down", "暂无解释")
-        action = "可以主动推进" if is_upright else "建议先观察与调整"
-        return f"单牌解读：围绕“{focus}”，在「{position}」位出现的{card_info.get('name_cn', '未知牌')}{orientation}提示你{action}，关键词：{meaning}"
-
     @staticmethod
     def _strip_inline_markdown(text: str) -> str:
         cleaned = text or ""
@@ -663,11 +656,10 @@ class Tarot:
                     yield event.plain_result(text)
                     return
                 is_upright_list.append(is_upright)
-                single_tip = self._single_card_tip(selected_cards[i], position, is_upright, question)
                 node = Node(
                     uin=event.get_self_id(),
                     name=bot_name,
-                    content=[Plain(header + text + single_tip + "\n"), Image.fromFileSystem(img_path)],
+                    content=[Plain(header + text), Image.fromFileSystem(img_path)],
                 )
                 chain.nodes.append(node)
                 record_cards.append(
@@ -731,8 +723,7 @@ class Tarot:
                     yield event.plain_result(text)
                     return
                 is_upright_list.append(is_upright)
-                single_tip = self._single_card_tip(selected_cards[i], position, is_upright, question)
-                yield event.chain_result([Plain(header + text + single_tip + "\n"), Image.fromFileSystem(img_path)])
+                yield event.chain_result([Plain(header + text), Image.fromFileSystem(img_path)])
                 record_cards.append(
                     {
                         "position": position,
@@ -871,7 +862,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.12")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.13")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -879,7 +870,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.12\n"
+            "赛博塔罗牌 v0.2.13\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
@@ -890,7 +881,7 @@ class TarotPlugin(Star):
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
-            "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
+            "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取牌面+整体分析卡片\n"
             "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
             "[开启/关闭群聊转发] 切换群聊转发模式"
         )
