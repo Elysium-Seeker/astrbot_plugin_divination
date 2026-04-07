@@ -32,6 +32,9 @@ class Tarot:
         self.draw_pool_factor: int = max(0, int(config.get("draw_pool_factor", 0)))
         raw_force_theme = config.get("force_theme", "BilibiliTarot")
         self.force_theme: str = str(raw_force_theme).strip() if raw_force_theme is not None else ""
+        self.enable_markdown_card: bool = config.get("enable_markdown_card", True)
+        raw_card_font_path = config.get("markdown_card_font_path", "")
+        self.markdown_card_font_path: str = str(raw_card_font_path).strip() if raw_card_font_path is not None else ""
         self.pending_sessions: Dict[str, Dict[str, Any]] = {}
         self.record_lock = asyncio.Lock()
         self.data_dir: Path = self._resolve_data_dir(context)
@@ -43,13 +46,15 @@ class Tarot:
             logger.error("tarot.json 文件缺失，请确保资源完整！")
             raise Exception("tarot.json 文件缺失，请确保资源完整！")
         logger.info(
-            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s, 强制主题: %s",
+            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s, 强制主题: %s, Markdown 卡片: %s, 卡片字体: %s",
             self.resource_path,
             self.include_ai_in_chain,
             self.enable_record,
             self.full_draw_pool,
             self.draw_pool_factor,
             self.force_theme or "<随机>",
+            self.enable_markdown_card,
+            self.markdown_card_font_path or "<自动探测>",
         )
 
     def _resolve_data_dir(self, context: Context) -> Path:
@@ -188,18 +193,34 @@ class Tarot:
         return cleaned.strip()
 
     @staticmethod
-    def _load_font(size: int, bold: bool = False):
+    def _normalize_markdown_text(text: str) -> str:
+        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        normalized = "".join(ch for ch in normalized if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+        return normalized.strip()
+
+    def _load_font(self, size: int, bold: bool = False):
+        candidates: List[str] = []
+        if self.markdown_card_font_path:
+            candidates.append(self.markdown_card_font_path)
+
         if os.name == "nt":
-            candidates = [
-                "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
-                "C:/Windows/Fonts/simhei.ttf",
-                "C:/Windows/Fonts/simsun.ttc",
-            ]
+            candidates.extend(
+                [
+                    "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+                    "C:/Windows/Fonts/msyh.ttc",
+                    "C:/Windows/Fonts/simhei.ttf",
+                    "C:/Windows/Fonts/simsun.ttc",
+                ]
+            )
         else:
-            candidates = [
-                "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            ]
+            candidates.extend(
+                [
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                    "/usr/share/fonts/truetype/arphic/ukai.ttc",
+                ]
+            )
 
         for path in candidates:
             try:
@@ -207,7 +228,7 @@ class Tarot:
                     return PIL.ImageFont.truetype(path, size=size)
             except Exception:
                 continue
-        return PIL.ImageFont.load_default()
+        return None
 
     def _wrap_text_lines(self, draw: Any, text: str, font: Any, max_width: int) -> List[str]:
         if not text:
@@ -252,7 +273,8 @@ class Tarot:
 
         lines.append("---")
         lines.append("## 深度解读")
-        content_lines = [line.strip() for line in (interpretation or "").splitlines() if line.strip()]
+        normalized_interpretation = self._normalize_markdown_text(interpretation)
+        content_lines = [line.strip() for line in normalized_interpretation.splitlines() if line.strip()]
         if not content_lines:
             lines.append("- 暂无解读。")
         else:
@@ -261,6 +283,13 @@ class Tarot:
 
     def _render_markdown_card(self, markdown_text: str) -> Optional[str]:
         try:
+            if not self.enable_markdown_card:
+                return None
+
+            markdown_text = self._normalize_markdown_text(markdown_text)
+            if not markdown_text:
+                return None
+
             width = 1080
             outer_padding = 36
             panel_padding = 40
@@ -270,6 +299,12 @@ class Tarot:
             font_h2 = self._load_font(34, bold=True)
             font_body = self._load_font(28, bold=False)
             font_meta = self._load_font(24, bold=False)
+
+            if not all([font_h1, font_h2, font_body, font_meta]):
+                logger.warning(
+                    "Markdown 占卜卡片渲染跳过：未找到可用中文字体。可配置 markdown_card_font_path 指向 ttf/ttc 字体文件。"
+                )
+                return None
 
             measure = PIL.Image.new("RGB", (width, 16), (0, 0, 0))
             measure_draw = PIL.ImageDraw.Draw(measure)
@@ -316,7 +351,7 @@ class Tarot:
                     font,
                     max_text_width - (20 if prefix else 0),
                 )
-                line_height = max(font.size + 8, 28)
+                line_height = max(getattr(font, "size", 24) + 8, 28)
                 for idx, wrapped_line in enumerate(wrapped):
                     output = (prefix if idx == 0 else "  ") + wrapped_line if prefix else wrapped_line
                     content_height += line_height
@@ -862,7 +897,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.13")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.14")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -870,7 +905,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.13\n"
+            "赛博塔罗牌 v0.2.14\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
@@ -878,6 +913,7 @@ class TarotPlugin(Star):
             "[编号规则] 编号从 1 开始，不存在 0 号牌\n"
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
             "[分析输出] 整体解读将渲染为 Markdown 风格占卜卡片\n"
+            "[乱码修复] 可设置 markdown_card_font_path 指向中文字体；若无可用字体将自动回退纯文本\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
