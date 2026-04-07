@@ -201,7 +201,11 @@ class Tarot:
             f"牌阵已确定：{formation_name}（{mode_text}，需抽 {cards_num} 张）\n"
             f"位置含义：{rep_text}\n"
             f"{cut_text}\n"
-            "请从下方编号中选择你要抽取的牌，使用命令：抽牌 编号1 编号2 ...\n"
+            "请从下方编号中选择你要抽取的牌。\n"
+            "输入方式：\n"
+            "1) 直接回复编号（推荐）\n"
+            "2) 抽牌 编号1 编号2 ...\n"
+            "3) /tarot 编号1 编号2 ...（分流兜底）\n"
             f"可选编号 1-{pool_size}：\n"
             f"{self._format_pool_numbers(pool_size)}"
         )
@@ -507,7 +511,7 @@ class Tarot:
             session_key = self._build_session_key(event)
             session = self.pending_sessions.get(session_key)
             if not session:
-                yield event.plain_result("当前没有待抽牌会话，请先发送“占卜 问题”或“塔罗牌 问题”。")
+                yield event.plain_result("当前没有待抽牌会话，请先发送 /tarot 你的问题 或 塔罗牌 你的问题。")
                 return
 
             if time.time() - session.get("created_at", 0) > self.pending_expire_seconds:
@@ -593,7 +597,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.8")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.9")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -601,7 +605,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.8\n"
+            "赛博塔罗牌 v0.2.9\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[抽牌池默认规则] 默认展示该主题下全部可抽牌编号\n"
