@@ -1,16 +1,17 @@
 import asyncio
+import json
+import logging
+import os
 import random
-from io import BytesIO
+import re
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import PIL.Image
 from astrbot.api.all import *
-from astrbot.api.event import filter, AstrMessageEvent
-import logging
-import os
-import json
-import re
+from astrbot.api.event import AstrMessageEvent
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +19,87 @@ class Tarot:
     def __init__(self, context: Context, config: AstrBotConfig):
         self.context = context
         self.tarot_json: Path = Path(__file__).parent / "tarot.json"
-        resource_path_str: str = config.get("resource_path", "resource")
+        resource_path_str: str = config.get("resource_path", "./resources")
         self.resource_path: Path = Path(__file__).parent / resource_path_str
         self.is_chain_reply: bool = config.get("chain_reply", True)
-        self.include_ai_in_chain: bool = config.get("include_ai_in_chain", False)
-        
+        self.include_ai_in_chain: bool = config.get("include_ai_in_chain", True)
+        self.pending_expire_seconds: int = int(config.get("pending_expire_seconds", 600))
+        self.enable_record: bool = config.get("enable_record", True)
+        self.draw_pool_factor: int = max(2, int(config.get("draw_pool_factor", 3)))
+        self.pending_sessions: Dict[str, Dict[str, Any]] = {}
+        self.record_lock = asyncio.Lock()
+        self.data_dir: Path = self._resolve_data_dir(context)
+        self.records_file: Path = self.data_dir / "divination_records.jsonl"
+
         os.makedirs(self.resource_path, exist_ok=True)
+        os.makedirs(self.data_dir, exist_ok=True)
         if not self.tarot_json.exists():
             logger.error("tarot.json 文件缺失，请确保资源完整！")
             raise Exception("tarot.json 文件缺失，请确保资源完整！")
-        logger.info(f"Tarot 插件初始化完成，资源路径: {self.resource_path}, AI 解析加入转发: {self.include_ai_in_chain}")
+        logger.info(
+            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s",
+            self.resource_path,
+            self.include_ai_in_chain,
+            self.enable_record,
+        )
+
+    def _resolve_data_dir(self, context: Context) -> Path:
+        data_dir_getter = getattr(context, "get_data_dir", None)
+        if callable(data_dir_getter):
+            try:
+                data_dir = data_dir_getter()
+                if data_dir:
+                    return Path(data_dir)
+            except Exception as e:
+                logger.warning("获取 AstrBot 数据目录失败，回退到插件 data 目录: %s", str(e))
+        return Path(__file__).parent / "data"
+
+    def _safe_event_call(self, event: AstrMessageEvent, method_name: str) -> Optional[Any]:
+        method = getattr(event, method_name, None)
+        if callable(method):
+            try:
+                return method()
+            except Exception:
+                return None
+        return None
+
+    def _build_session_key(self, event: AstrMessageEvent) -> str:
+        group_id = self._safe_event_call(event, "get_group_id")
+        user_id = self._safe_event_call(event, "get_sender_id")
+        if user_id is None:
+            user_id = self._safe_event_call(event, "get_user_id")
+        if user_id is None:
+            user_id = self._safe_event_call(event, "get_session_id")
+        if user_id is None:
+            user_id = "unknown-user"
+        if group_id is not None:
+            return f"group:{group_id}:user:{user_id}"
+        return f"private:user:{user_id}"
+
+    def _cleanup_pending_sessions(self):
+        now = time.time()
+        expired_keys = [
+            key
+            for key, session in self.pending_sessions.items()
+            if now - session.get("created_at", now) > self.pending_expire_seconds
+        ]
+        for key in expired_keys:
+            self.pending_sessions.pop(key, None)
+
+    def _normalize_question(self, user_input: str) -> str:
+        question = re.sub(r"\s+", " ", user_input or "").strip()
+        return question or "我当前最需要关注什么？"
+
+    def _load_tarot_content(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        with open(self.tarot_json, "r", encoding="utf-8") as f:
+            content = json.load(f)
+        all_cards = content.get("cards") or {}
+        all_formations = content.get("formations") or {}
+        if not all_cards:
+            raise Exception("tarot.json 中缺少 cards 定义")
+        if not all_formations:
+            raise Exception("tarot.json 中缺少 formations 定义")
+        return all_cards, all_formations
 
     def pick_theme(self) -> str:
         sub_themes_dir: List[str] = [f.name for f in self.resource_path.iterdir() if f.is_dir()]
@@ -43,6 +115,77 @@ class Tarot:
             if f.is_dir() and f.name in all_sub_types
         ]
         return sub_types or all_sub_types
+
+    def _all_candidate_cards(self, all_cards: Dict[str, Any], theme: str) -> List[Dict[str, Any]]:
+        sub_types = self.pick_sub_types(theme)
+        cards = [card for card in all_cards.values() if card.get("type") in sub_types]
+        if not cards:
+            raise Exception(f"主题 {theme} 下没有可抽取的牌")
+        return cards
+
+    def _build_draw_pool(self, all_cards: Dict[str, Any], theme: str, cards_num: int) -> List[Dict[str, Any]]:
+        candidates = self._all_candidate_cards(all_cards, theme)
+        if len(candidates) < cards_num:
+            raise Exception(f"主题 {theme} 的牌数量不足，需要 {cards_num} 张")
+        pool_size = min(len(candidates), max(cards_num + 2, cards_num * self.draw_pool_factor))
+        return random.sample(candidates, pool_size)
+
+    def _normalize_representations(self, representations: List[str], cards_num: int) -> List[str]:
+        result = list(representations[:cards_num])
+        while len(result) < cards_num:
+            result.append(f"位置{len(result) + 1}")
+        return result
+
+    def _format_pool_numbers(self, pool_size: int) -> str:
+        numbers = [str(i) for i in range(1, pool_size + 1)]
+        return "\n".join(" ".join(numbers[i:i + 10]) for i in range(0, len(numbers), 10))
+
+    def _single_card_tip(self, card_info: Dict[str, Any], position: str, is_upright: bool, user_input: str) -> str:
+        focus = user_input or "当前议题"
+        orientation = "正位" if is_upright else "逆位"
+        meaning = card_info.get("meaning", {}).get("up" if is_upright else "down", "暂无解释")
+        action = "可以主动推进" if is_upright else "建议先观察与调整"
+        return f"单牌解读：围绕“{focus}”，在「{position}」位出现的{card_info.get('name_cn', '未知牌')}{orientation}提示你{action}，关键词：{meaning}"
+
+    async def _append_record(self, record: Dict[str, Any]):
+        if not self.enable_record:
+            return
+        async with self.record_lock:
+            with open(self.records_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _parse_draw_numbers(self, text: str) -> List[int]:
+        if not text:
+            return []
+        return [int(num) for num in re.findall(r"\d+", text)]
+
+    def _build_preparation_message(self, question: str) -> str:
+        return (
+            f"已收到你的问题：{question}\n"
+            "请先让自己平静下来，深呼吸三次，专注在这个问题上。\n"
+            "正在净化牌组并洗牌中..."
+        )
+
+    def _build_draw_prompt(
+        self,
+        formation_name: str,
+        cards_num: int,
+        pool_size: int,
+        representations: List[str],
+        is_cut: bool,
+        is_single: bool,
+    ) -> str:
+        mode_text = "单张抽牌" if is_single else "多张牌阵"
+        rep_text = "、".join(representations)
+        cut_text = "本次包含切牌位。" if is_cut else "本次不包含切牌位。"
+        return (
+            f"牌阵已确定：{formation_name}（{mode_text}，需抽 {cards_num} 张）\n"
+            f"位置含义：{rep_text}\n"
+            f"{cut_text}\n"
+            "请从下方编号中选择你要抽取的牌，使用命令：抽牌 编号1 编号2 ...\n"
+            f"可选编号 1-{pool_size}：\n"
+            f"{self._format_pool_numbers(pool_size)}"
+        )
 
     def _random_cards(self, all_cards: Dict, theme: str, num: int = 1) -> List[Dict]:
         sub_types: List[str] = self.pick_sub_types(theme)
@@ -102,10 +245,13 @@ class Tarot:
     async def _match_formation(self, text: str, all_formations: Dict) -> str:
         text = text.strip().lower()
         formation_names = list(all_formations.keys())
+        if not formation_names:
+            raise Exception("无可用牌阵")
         keywords = ["情感", "爱情", "关系", "事业", "工作", "未来", "过去", "现状", "处境", "挑战", "建议"]
         for formation in formation_names:
             for keyword in keywords:
-                if keyword in text and keyword in " ".join(all_formations[formation]["representations"][0]).lower():
+                sample_rep = all_formations[formation].get("representations", [[""]])[0]
+                if keyword in text and keyword in " ".join(sample_rep).lower():
                     logger.info(f"模糊匹配成功：用户输入 '{text}' 匹配到牌阵 '{formation}'")
                     return formation
         prompt = f"用户输入了以下占卜指令：'{text}'。请根据输入内容，从以下牌阵中选择一个最匹配的牌阵并返回其名称（仅返回名称，无需解释）：\n{', '.join(formation_names)}\n如果无法明确匹配，返回 '随机选择'。"
@@ -149,131 +295,286 @@ class Tarot:
             logger.error(f"生成 AI 解析失败: {str(e)}")
             return "抱歉，AI 解析生成失败，请稍后再试。"
 
+    async def _create_pending_session(self, event: AstrMessageEvent, user_input: str, is_single: bool):
+        self._cleanup_pending_sessions()
+        question = self._normalize_question(user_input)
+        theme = self.pick_theme()
+        all_cards, all_formations = self._load_tarot_content()
+
+        if is_single:
+            formation_name = "单张牌阵"
+            cards_num = 1
+            is_cut = False
+            representations = ["当前情况"]
+        else:
+            formation_name = await self._match_formation(question, all_formations)
+            formation = all_formations.get(formation_name)
+            if not formation:
+                formation_name = random.choice(list(all_formations.keys()))
+                formation = all_formations.get(formation_name, {})
+            cards_num = int(formation.get("cards_num", 3))
+            is_cut = bool(formation.get("is_cut", False))
+            rep_candidates = formation.get("representations") or []
+            selected_rep = random.choice(rep_candidates) if rep_candidates else []
+            representations = self._normalize_representations(selected_rep, cards_num)
+
+        draw_pool = self._build_draw_pool(all_cards, theme, cards_num)
+        session_key = self._build_session_key(event)
+        self.pending_sessions[session_key] = {
+            "created_at": time.time(),
+            "session_key": session_key,
+            "question": question,
+            "theme": theme,
+            "formation_name": formation_name,
+            "cards_num": cards_num,
+            "is_cut": is_cut,
+            "representations": representations,
+            "draw_pool": draw_pool,
+            "pool_size": len(draw_pool),
+            "is_single": is_single,
+            "group_id": self._safe_event_call(event, "get_group_id"),
+            "user_id": self._safe_event_call(event, "get_sender_id")
+            or self._safe_event_call(event, "get_user_id")
+            or "unknown-user",
+        }
+        return self.pending_sessions[session_key]
+
     async def divine(self, event: AstrMessageEvent, user_input: str = ""):
         try:
-            theme: str = self.pick_theme()
-            with open(self.tarot_json, 'r', encoding='utf-8') as f:
-                content = json.load(f)
-                all_cards = content.get("cards")
-                all_formations = content.get("formations")
-                formation_name = await self._match_formation(user_input, all_formations)
-                formation = all_formations.get(formation_name)
-            yield event.plain_result(f"启用{formation_name}，正在洗牌中...")
-            cards_num: int = formation.get("cards_num")
-            cards_info_list = self._random_cards(all_cards, theme, cards_num)
-            is_cut: bool = formation.get("is_cut")
-            representations: List[str] = random.choice(formation.get("representations"))
-            is_upright_list = []
-            results = []
-            group_id = event.get_group_id()
-            is_group_chat = group_id is not None
-            if self.is_chain_reply and is_group_chat:
-                chain = Nodes([])
-                for i in range(cards_num):
-                    header = f"切牌「{representations[i]}」\n" if (is_cut and i == cards_num - 1) else f"第{i+1}张牌「{representations[i]}」\n"
-                    flag, text, img_path, is_upright = await self._get_text_and_image(theme, cards_info_list[i])
-                    if not flag:
-                        yield event.plain_result(text)
-                        return
-                    is_upright_list.append(is_upright)
-                    node = Node(
-                        uin=event.get_self_id(),
-                        name=self.context.get_config().get("nickname", "占卜师"),
-                        content=[Plain(header + text), Image.fromFileSystem(img_path)]
-                    )
-                    chain.nodes.append(node)
-                    results.append((header, text, img_path))
-                bot_name = self.context.get_config().get("nickname", "占卜师")
-                interpretation = await self._generate_ai_interpretation(formation_name, cards_info_list, representations, is_upright_list, user_input)
-                if self.include_ai_in_chain:
-                    ai_node = Node(
-                        uin=event.get_self_id(),
-                        name=bot_name,
-                        content=[Plain(f"\n“属于你的占卜分析！”\n{interpretation}")]
-                    )
-                    chain.nodes.append(ai_node)
-                if not chain.nodes:
-                    yield event.plain_result("无法生成塔罗牌结果，请稍后重试")
-                    return
-                logger.info(f"群聊转发发送 {len(chain.nodes)} 张塔罗牌，AI 解析是否包含: {self.include_ai_in_chain}")
-                yield event.chain_result([chain])
-                if not self.include_ai_in_chain:
-                    yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
-            else:
-                for i in range(cards_num):
-                    header = f"切牌「{representations[i]}」\n" if (is_cut and i == cards_num - 1) else f"第{i+1}张牌「{representations[i]}」\n"
-                    flag, text, img_path, is_upright = await self._get_text_and_image(theme, cards_info_list[i])
-                    if not flag:
-                        yield event.plain_result(text)
-                        return
-                    is_upright_list.append(is_upright)
-                    yield event.chain_result([Plain(header + text), Image.fromFileSystem(img_path)])
-                    results.append((header, text, img_path))
-                    if i < cards_num - 1:
-                        await asyncio.sleep(2)
-                bot_name = self.context.get_config().get("nickname", "占卜师")
-                interpretation = await self._generate_ai_interpretation(formation_name, cards_info_list, representations, is_upright_list, user_input)
-                yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+            session = await self._create_pending_session(event, user_input, is_single=False)
+            yield event.plain_result(self._build_preparation_message(session["question"]))
+            await asyncio.sleep(1)
+            yield event.plain_result("洗牌完成，正在切牌并锁定牌阵...")
+            yield event.plain_result(
+                self._build_draw_prompt(
+                    formation_name=session["formation_name"],
+                    cards_num=session["cards_num"],
+                    pool_size=session["pool_size"],
+                    representations=session["representations"],
+                    is_cut=session["is_cut"],
+                    is_single=False,
+                )
+            )
         except Exception as e:
             logger.error(f"占卜过程出错: {str(e)}")
             yield event.plain_result(f"占卜失败: {str(e)}")
 
     async def onetime_divine(self, event: AstrMessageEvent, user_input: str = ""):
         try:
-            theme: str = self.pick_theme()
-            with open(self.tarot_json, 'r', encoding='utf-8') as f:
-                content = json.load(f)
-                all_cards = content.get("cards")
-                card_info_list = self._random_cards(all_cards, theme)
-            group_id = event.get_group_id()
-            is_group_chat = group_id is not None
-            flag, text, img_path, is_upright = await self._get_text_and_image(theme, card_info_list[0])
-            if not flag:
-                yield event.plain_result(text)
-                return
-            bot_name = self.context.get_config().get("nickname", "占卜师")
-            interpretation = await self._generate_ai_interpretation(
-                "单张牌占卜",
-                card_info_list,
-                ["当前情况"],
-                [is_upright],
-                user_input
-            )
-            if self.is_chain_reply and is_group_chat:
-                chain = Nodes([])
-                node = Node(
-                    uin=event.get_self_id(),
-                    name=bot_name,
-                    content=[Plain("回应是" + text), Image.fromFileSystem(img_path)]
+            session = await self._create_pending_session(event, user_input, is_single=True)
+            yield event.plain_result(self._build_preparation_message(session["question"]))
+            await asyncio.sleep(1)
+            yield event.plain_result("洗牌完成，已进入单张抽牌流程。")
+            yield event.plain_result(
+                self._build_draw_prompt(
+                    formation_name=session["formation_name"],
+                    cards_num=session["cards_num"],
+                    pool_size=session["pool_size"],
+                    representations=session["representations"],
+                    is_cut=session["is_cut"],
+                    is_single=True,
                 )
-                chain.nodes.append(node)
-                if self.include_ai_in_chain:
-                    ai_node = Node(
-                        uin=event.get_self_id(),
-                        name=bot_name,
-                        content=[Plain(f"\n“属于你的占卜分析！”\n{interpretation}")]
-                    )
-                    chain.nodes.append(ai_node)
-                if not chain.nodes:
-                    yield event.plain_result("无法生成塔罗牌结果，请稍后重试")
-                    return
-                logger.info(f"单张占卜群聊转发发送 {len(chain.nodes)} 条消息，AI 解析是否包含: {self.include_ai_in_chain}")
-                yield event.chain_result([chain])
-                if not self.include_ai_in_chain:
-                    yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
-            else:
-                yield event.chain_result([Plain("回应是" + text), Image.fromFileSystem(img_path)])
-                yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+            )
         except Exception as e:
             logger.error(f"单张占卜出错: {str(e)}")
             yield event.plain_result(f"单张占卜失败: {str(e)}")
+
+    async def _reveal_cards(
+        self,
+        event: AstrMessageEvent,
+        session: Dict[str, Any],
+        selected_cards: List[Dict[str, Any]],
+        selected_numbers: List[int],
+    ):
+        cards_num = session["cards_num"]
+        representations = session["representations"]
+        is_cut = session["is_cut"]
+        theme = session["theme"]
+        question = session["question"]
+        formation_name = session["formation_name"]
+        bot_name = self.context.get_config().get("nickname", "占卜师")
+
+        is_upright_list: List[bool] = []
+        record_cards: List[Dict[str, Any]] = []
+        group_id = self._safe_event_call(event, "get_group_id")
+        is_group_chat = group_id is not None
+
+        if self.is_chain_reply and is_group_chat:
+            chain = Nodes([])
+            for i in range(cards_num):
+                position = representations[i]
+                header = f"切牌「{position}」\n" if (is_cut and i == cards_num - 1) else f"第{i + 1}张牌「{position}」\n"
+                flag, text, img_path, is_upright = await self._get_text_and_image(theme, selected_cards[i])
+                if not flag:
+                    yield event.plain_result(text)
+                    return
+                is_upright_list.append(is_upright)
+                single_tip = self._single_card_tip(selected_cards[i], position, is_upright, question)
+                node = Node(
+                    uin=event.get_self_id(),
+                    name=bot_name,
+                    content=[Plain(header + text + single_tip + "\n"), Image.fromFileSystem(img_path)],
+                )
+                chain.nodes.append(node)
+                record_cards.append(
+                    {
+                        "position": position,
+                        "name": selected_cards[i].get("name_cn", "未知牌"),
+                        "orientation": "正位" if is_upright else "逆位",
+                        "meaning": selected_cards[i].get("meaning", {}).get("up" if is_upright else "down", ""),
+                    }
+                )
+            interpretation = await self._generate_ai_interpretation(
+                formation_name, selected_cards, representations, is_upright_list, question
+            )
+            if self.include_ai_in_chain:
+                chain.nodes.append(
+                    Node(
+                        uin=event.get_self_id(),
+                        name=bot_name,
+                        content=[Plain(f"\n“属于你的占卜分析！”\n{interpretation}")],
+                    )
+                )
+            if not chain.nodes:
+                yield event.plain_result("无法生成塔罗牌结果，请稍后重试")
+                return
+            yield event.chain_result([chain])
+            if not self.include_ai_in_chain:
+                yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+        else:
+            for i in range(cards_num):
+                position = representations[i]
+                header = f"切牌「{position}」\n" if (is_cut and i == cards_num - 1) else f"第{i + 1}张牌「{position}」\n"
+                flag, text, img_path, is_upright = await self._get_text_and_image(theme, selected_cards[i])
+                if not flag:
+                    yield event.plain_result(text)
+                    return
+                is_upright_list.append(is_upright)
+                single_tip = self._single_card_tip(selected_cards[i], position, is_upright, question)
+                yield event.chain_result([Plain(header + text + single_tip + "\n"), Image.fromFileSystem(img_path)])
+                record_cards.append(
+                    {
+                        "position": position,
+                        "name": selected_cards[i].get("name_cn", "未知牌"),
+                        "orientation": "正位" if is_upright else "逆位",
+                        "meaning": selected_cards[i].get("meaning", {}).get("up" if is_upright else "down", ""),
+                    }
+                )
+                if i < cards_num - 1:
+                    await asyncio.sleep(1)
+            interpretation = await self._generate_ai_interpretation(
+                formation_name, selected_cards, representations, is_upright_list, question
+            )
+            yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
+
+        await self._append_record(
+            {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "session_key": session["session_key"],
+                "group_id": session["group_id"],
+                "user_id": session["user_id"],
+                "question": question,
+                "theme": theme,
+                "formation": formation_name,
+                "selected_numbers": selected_numbers,
+                "cards": record_cards,
+                "overall_interpretation": interpretation,
+            }
+        )
+
+    async def draw_by_numbers(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            self._cleanup_pending_sessions()
+            session_key = self._build_session_key(event)
+            session = self.pending_sessions.get(session_key)
+            if not session:
+                yield event.plain_result("当前没有待抽牌会话，请先发送“占卜 问题”或“塔罗牌 问题”。")
+                return
+
+            if time.time() - session.get("created_at", 0) > self.pending_expire_seconds:
+                self.pending_sessions.pop(session_key, None)
+                yield event.plain_result("抽牌会话已超时，请重新发起占卜。")
+                return
+
+            selected_numbers = self._parse_draw_numbers(text)
+            cards_num = session["cards_num"]
+            pool_size = session["pool_size"]
+            if len(selected_numbers) != cards_num:
+                yield event.plain_result(
+                    f"需要选择 {cards_num} 个编号，当前收到 {len(selected_numbers)} 个。示例：抽牌 {' '.join(str(i + 1) for i in range(cards_num))}"
+                )
+                return
+            if len(set(selected_numbers)) != len(selected_numbers):
+                yield event.plain_result("抽牌编号不能重复，请重新输入。")
+                return
+            if any(num < 1 or num > pool_size for num in selected_numbers):
+                yield event.plain_result(f"编号超出范围，请在 1-{pool_size} 之间选择。")
+                return
+
+            selected_cards = [session["draw_pool"][num - 1] for num in selected_numbers]
+            self.pending_sessions.pop(session_key, None)
+            yield event.plain_result(f"已抽取编号：{' '.join(str(num) for num in selected_numbers)}，正在翻牌解读...")
+            async for result in self._reveal_cards(event, session, selected_cards, selected_numbers):
+                yield result
+        except Exception as e:
+            logger.error("抽牌流程失败: %s", str(e))
+            yield event.plain_result(f"抽牌失败: {str(e)}")
+
+    async def show_records(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            if not self.records_file.exists():
+                yield event.plain_result("暂无占卜记录。")
+                return
+
+            requested = self._parse_draw_numbers(text)
+            limit = requested[0] if requested else 3
+            limit = max(1, min(10, limit))
+
+            session_key = self._build_session_key(event)
+            with open(self.records_file, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+            records: List[Dict[str, Any]] = []
+            for line in reversed(lines):
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("session_key") == session_key:
+                    records.append(record)
+                if len(records) >= limit:
+                    break
+
+            if not records:
+                yield event.plain_result("暂无你的占卜记录。")
+                return
+
+            chunks = []
+            for idx, record in enumerate(records, start=1):
+                cards_text = "、".join(
+                    f"{card.get('position', '位置')}:{card.get('name', '未知')}{card.get('orientation', '')}"
+                    for card in record.get("cards", [])
+                )
+                number_text = " ".join(str(num) for num in record.get("selected_numbers", []))
+                chunks.append(
+                    f"{idx}. {record.get('created_at', '-') }\n"
+                    f"问题：{record.get('question', '-') }\n"
+                    f"牌阵：{record.get('formation', '-') }\n"
+                    f"抽牌编号：{number_text or '-'}\n"
+                    f"牌面：{cards_text or '-'}"
+                )
+
+            yield event.plain_result("最近占卜记录：\n\n" + "\n\n".join(chunks))
+        except Exception as e:
+            logger.error("读取占卜记录失败: %s", str(e))
+            yield event.plain_result(f"读取占卜记录失败: {str(e)}")
 
     def switch_chain_reply(self, new_state: bool) -> str:
         self.is_chain_reply = new_state
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.1.5")
+@register("tarot", "XziXmn", "赛博塔罗牌占卜插件", "0.2.0")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -284,9 +585,11 @@ class TarotPlugin(Star):
         try:
             if "帮助" in text:
                 yield event.plain_result(
-                    "赛博塔罗牌 v0.1.5\n"
-                    "[占卜] 随机选取牌阵进行占卜并提供 AI 解析，可附加关键词（如 '占卜 情感'）匹配牌阵\n"
-                    "[塔罗牌] 得到单张塔罗牌回应及 AI 解析\n"
+                    "赛博塔罗牌 v0.2.0\n"
+                    "[占卜 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
+                    "[塔罗牌 问题] 进入单张抽牌流程\n"
+                    "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
+                    "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
                     "[开启/关闭群聊转发] 切换群聊转发模式"
                 )
             else:
@@ -302,9 +605,11 @@ class TarotPlugin(Star):
         try:
             if "帮助" in text:
                 yield event.plain_result(
-                    "赛博塔罗牌 v0.1.5\n"
-                    "[占卜] 随机选取牌阵进行占卜并提供 AI 解析，可附加关键词（如 '占卜 情感'）匹配牌阵\n"
-                    "[塔罗牌] 得到单张塔罗牌回应及 AI 解析\n"
+                    "赛博塔罗牌 v0.2.0\n"
+                    "[占卜 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
+                    "[塔罗牌 问题] 进入单张抽牌流程\n"
+                    "[抽牌 编号1 编号2 ...] 按提示完成抽牌并获取单牌+整体解读\n"
+                    "[占卜记录 数量] 查看最近记录（默认 3 条，最多 10 条）\n"
                     "[开启/关闭群聊转发] 切换群聊转发模式"
                 )
             else:
@@ -314,6 +619,26 @@ class TarotPlugin(Star):
         except Exception as e:
             logger.error(f"处理塔罗牌命令失败: {str(e)}")
             yield event.plain_result(f"塔罗牌命令执行失败: {str(e)}")
+
+    @command("抽牌")
+    async def draw_handler(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            async for result in self.tarot.draw_by_numbers(event, text):
+                yield result
+            event.stop_event()
+        except Exception as e:
+            logger.error("处理抽牌命令失败: %s", str(e))
+            yield event.plain_result(f"抽牌命令执行失败: {str(e)}")
+
+    @command("占卜记录")
+    async def records_handler(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            async for result in self.tarot.show_records(event, text):
+                yield result
+            event.stop_event()
+        except Exception as e:
+            logger.error("处理占卜记录命令失败: %s", str(e))
+            yield event.plain_result(f"占卜记录命令执行失败: {str(e)}")
 
     @command("开启群聊转发")
     async def enable_chain_reply(self, event: AstrMessageEvent, text: str = ""):

@@ -14,5 +14,20 @@
     "type": "bool",
     "default": true,
     "description": "是否将 AI 解析信息加入群聊转发，若为 false 则单独发送"
+  },
+  "pending_expire_seconds": {
+    "type": "int",
+    "default": 600,
+    "description": "待抽牌会话超时时间（秒）"
+  },
+  "draw_pool_factor": {
+    "type": "int",
+    "default": 3,
+    "description": "编号抽牌池扩容倍数，最终池大小约为抽牌数量的该倍数"
+  },
+  "enable_record": {
+    "type": "bool",
+    "default": true,
+    "description": "是否记录占卜结果，供“占卜记录”命令查询"
   }
 }
