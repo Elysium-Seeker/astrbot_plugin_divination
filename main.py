@@ -190,7 +190,19 @@ class Tarot:
     def _candidate_font_paths(self, bold: bool = False) -> List[str]:
         candidates: List[str] = []
         if self.markdown_card_font_path:
-            candidates.append(self.markdown_card_font_path)
+            custom_path = Path(self.markdown_card_font_path)
+            if custom_path.is_dir():
+                for pattern in ("*.ttf", "*.ttc", "*.otf"):
+                    for font_file in sorted(custom_path.glob(pattern)):
+                        candidates.append(str(font_file))
+            else:
+                candidates.append(str(custom_path))
+
+        local_font_dir = Path(__file__).parent / "resources" / "fonts"
+        if local_font_dir.exists():
+            for pattern in ("*.ttf", "*.ttc", "*.otf"):
+                for font_file in sorted(local_font_dir.glob(pattern)):
+                    candidates.append(str(font_file))
 
         if os.name == "nt":
             windows_font_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
@@ -198,7 +210,10 @@ class Tarot:
                 candidates.extend(
                     [
                         str(windows_font_dir / "msyhbd.ttc"),
+                        str(windows_font_dir / "msyhbd.ttf"),
+                        str(windows_font_dir / "Dengb.ttf"),
                         str(windows_font_dir / "simhei.ttf"),
+                        str(windows_font_dir / "simkai.ttf"),
                         str(windows_font_dir / "simsun.ttc"),
                     ]
                 )
@@ -206,26 +221,40 @@ class Tarot:
                 candidates.extend(
                     [
                         str(windows_font_dir / "msyh.ttc"),
-                        str(windows_font_dir / "simsun.ttc"),
+                        str(windows_font_dir / "msyh.ttf"),
+                        str(windows_font_dir / "Deng.ttf"),
                         str(windows_font_dir / "simhei.ttf"),
+                        str(windows_font_dir / "simsun.ttc"),
+                        str(windows_font_dir / "simkai.ttf"),
                     ]
                 )
         else:
             if bold:
                 candidates.extend(
                     [
+                        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+                        "/usr/share/fonts/truetype/noto/NotoSerifCJK-Bold.ttc",
                         "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
                         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                        "/usr/share/fonts/noto-cjk/NotoSerifCJK-Bold.ttc",
+                        "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+                        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
                         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                        "/usr/share/fonts/opentype/adobe-source-han-sans/SourceHanSansCN-Bold.otf",
                     ]
                 )
             else:
                 candidates.extend(
                     [
+                        "/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc",
+                        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
                         "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
                         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                        "/usr/share/fonts/noto-cjk/NotoSerifCJK-Regular.ttc",
+                        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
                         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        "/usr/share/fonts/opentype/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
                     ]
                 )
 
@@ -245,7 +274,7 @@ class Tarot:
                     return PIL.ImageFont.truetype(font_path, size)
             except Exception:
                 continue
-        return PIL.ImageFont.load_default()
+        return None
 
     @staticmethod
     def _strip_inline_markdown(text: str) -> str:
@@ -331,6 +360,12 @@ class Tarot:
             font_h2 = self._load_font(38, bold=True)
             font_h3 = self._load_font(32, bold=True)
             font_body = self._load_font(28, bold=False)
+
+            if not all([font_h1, font_h2, font_h3, font_body]):
+                logger.warning(
+                    "Markdown 卡片渲染跳过：未找到可用中文字体，已回退纯文本。请配置 markdown_card_font_path 或在系统安装 Noto CJK/WenQuanYi 字体。"
+                )
+                return None
 
             measure = PIL.Image.new("RGB", (width, 20), (0, 0, 0))
             measure_draw = PIL.ImageDraw.Draw(measure)
