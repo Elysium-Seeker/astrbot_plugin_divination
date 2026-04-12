@@ -20,6 +20,11 @@
     "default": true,
     "description": "是否启用 Markdown 占卜分析卡片渲染。关闭后回退为纯文本分析"
   },
+  "markdown_card_font_path": {
+    "type": "string",
+    "default": "",
+    "description": "Markdown 卡片字体路径（ttf/ttc，可选）。为空时自动探测系统字体"
+  },
   "include_ai_in_chain": {
     "type": "bool",
     "default": true,

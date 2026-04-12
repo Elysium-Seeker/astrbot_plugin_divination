@@ -14,8 +14,6 @@ import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
 from astrbot.api.all import *
-import markdown
-from playwright.async_api import async_playwright
 from astrbot.api.event import AstrMessageEvent, filter
 
 logger = logging.getLogger(__name__)
@@ -189,6 +187,102 @@ class Tarot:
         normalized = "".join(ch for ch in normalized if ch == "\n" or ch == "\t" or ord(ch) >= 32)
         return normalized.strip()
 
+    def _candidate_font_paths(self, bold: bool = False) -> List[str]:
+        candidates: List[str] = []
+        if self.markdown_card_font_path:
+            candidates.append(self.markdown_card_font_path)
+
+        if os.name == "nt":
+            windows_font_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            if bold:
+                candidates.extend(
+                    [
+                        str(windows_font_dir / "msyhbd.ttc"),
+                        str(windows_font_dir / "simhei.ttf"),
+                        str(windows_font_dir / "simsun.ttc"),
+                    ]
+                )
+            else:
+                candidates.extend(
+                    [
+                        str(windows_font_dir / "msyh.ttc"),
+                        str(windows_font_dir / "simsun.ttc"),
+                        str(windows_font_dir / "simhei.ttf"),
+                    ]
+                )
+        else:
+            if bold:
+                candidates.extend(
+                    [
+                        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+                        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                    ]
+                )
+            else:
+                candidates.extend(
+                    [
+                        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+                        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    ]
+                )
+
+        # 去重并保序。
+        unique_paths: List[str] = []
+        seen: set = set()
+        for path in candidates:
+            if path and path not in seen:
+                unique_paths.append(path)
+                seen.add(path)
+        return unique_paths
+
+    def _load_font(self, size: int, bold: bool = False):
+        for font_path in self._candidate_font_paths(bold=bold):
+            try:
+                if Path(font_path).exists():
+                    return PIL.ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
+        return PIL.ImageFont.load_default()
+
+    @staticmethod
+    def _strip_inline_markdown(text: str) -> str:
+        cleaned = text or ""
+        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+        cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+        cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+        cleaned = re.sub(r"_([^_]+)_", r"\1", cleaned)
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _measure_text(draw: PIL.ImageDraw.ImageDraw, text: str, font) -> Tuple[int, int]:
+        value = text if text else " "
+        left, top, right, bottom = draw.textbbox((0, 0), value, font=font)
+        return max(1, right - left), max(1, bottom - top)
+
+    def _wrap_text_lines(self, draw: PIL.ImageDraw.ImageDraw, text: str, font, max_width: int) -> List[str]:
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return [""]
+
+        lines: List[str] = []
+        current = ""
+        for ch in clean_text:
+            test = current + ch
+            width, _ = self._measure_text(draw, test, font)
+            if width <= max_width or not current:
+                current = test
+            else:
+                lines.append(current.rstrip())
+                current = ch
+        if current:
+            lines.append(current.rstrip())
+        return lines
+
     def _build_interpretation_markdown(
         self,
         question: str,
@@ -226,136 +320,135 @@ class Tarot:
         markdown_text = self._normalize_markdown_text(markdown_text)
         if not markdown_text:
             return None
-        
+
         try:
-            html_content = markdown.markdown(markdown_text)
-            
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset='utf-8'>
-                <style>
-                    @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap');
-                    body {{
-                        font-family: "Noto Serif SC", "Microsoft YaHei", serif;
-                        background-color: #0d0914;
-                        color: #e8dcc4;
-                        padding: 40px;
-                        margin: 0;
-                        width: 800px;
-                    }}
-                    .card {{
-                        background: radial-gradient(circle at top center, #261a35 0%, #120c1c 100%);
-                        border: 2px solid #8c734b;
-                        border-radius: 12px;
-                        padding: 50px 40px;
-                        box-shadow: 0 0 40px rgba(0,0,0,0.8), inset 0 0 20px rgba(140, 115, 75, 0.2);
-                        position: relative;
-                    }}
-                    .card::before {{
-                        content: '';
-                        position: absolute;
-                        top: 10px; bottom: 10px; left: 10px; right: 10px;
-                        border: 1px solid rgba(212, 175, 55, 0.3);
-                        border-radius: 8px;
-                        pointer-events: none;
-                    }}
-                    h1 {{
-                        text-align: center;
-                        color: #d4af37;
-                        font-size: 32px;
-                        font-weight: 700;
-                        border-bottom: 1px solid rgba(212, 175, 55, 0.3);
-                        padding-bottom: 20px;
-                        margin-top: 0;
-                        margin-bottom: 30px;
-                        letter-spacing: 4px;
-                        text-shadow: 0 2px 4px rgba(0,0,0,0.5);
-                    }}
-                    h2 {{
-                        color: #c9a45c;
-                        font-size: 22px;
-                        border-bottom: 1px dashed rgba(201, 164, 92, 0.3);
-                        padding-bottom: 8px;
-                        margin-top: 30px;
-                        display: inline-block;
-                        letter-spacing: 2px;
-                    }}
-                    h3 {{
-                        color: #b89c63;
-                        font-size: 18px;
-                        margin-top: 25px;
-                    }}
-                    ul {{
-                        list-style-type: none;
-                        padding: 0;
-                    }}
-                    li {{
-                        margin-bottom: 12px;
-                        line-height: 1.8;
-                        color: #d8caba;
-                    }}
-                    li::before {{
-                        content: '✦ ';
-                        color: #d4af37;
-                        margin-right: 5px;
-                    }}
-                    strong {{
-                        color: #f7e0a3;
-                        font-weight: 700;
-                    }}
-                    hr {{
-                        border: none;
-                        border-top: 1px solid rgba(212, 175, 55, 0.2);
-                        margin: 40px 0;
-                    }}
-                    p {{
-                        line-height: 1.8;
-                        margin-bottom: 15px;
-                        text-align: justify;
-                    }}
-                </style>
-            </head>
-            <body id="body">
-                <div class="card" id="card">
-                    {html_content}
-                </div>
-            </body>
-            </html>
-            """
-            
+            width = 1080
+            outer_padding = 36
+            panel_padding = 42
+            max_text_width = width - (outer_padding * 2) - (panel_padding * 2)
+
+            font_h1 = self._load_font(50, bold=True)
+            font_h2 = self._load_font(38, bold=True)
+            font_h3 = self._load_font(32, bold=True)
+            font_body = self._load_font(28, bold=False)
+
+            measure = PIL.Image.new("RGB", (width, 20), (0, 0, 0))
+            measure_draw = PIL.ImageDraw.Draw(measure)
+
+            layout_items: List[Dict[str, Any]] = []
+            content_height = 0
+
+            for raw in markdown_text.splitlines():
+                line = raw.strip()
+                if not line:
+                    spacer = 14
+                    layout_items.append({"kind": "space", "height": spacer})
+                    content_height += spacer
+                    continue
+
+                if line == "---":
+                    divider_h = 32
+                    layout_items.append({"kind": "divider", "height": divider_h})
+                    content_height += divider_h
+                    continue
+
+                font = font_body
+                color = (224, 214, 197)
+                line_gap = 12
+                prefix = ""
+                text = line
+                indent = 0
+
+                if line.startswith("# "):
+                    text = line[2:].strip()
+                    font = font_h1
+                    color = (233, 194, 112)
+                    line_gap = 20
+                elif line.startswith("## "):
+                    text = line[3:].strip()
+                    font = font_h2
+                    color = (214, 173, 98)
+                    line_gap = 16
+                elif line.startswith("### "):
+                    text = line[4:].strip()
+                    font = font_h3
+                    color = (196, 159, 95)
+                    line_gap = 14
+                elif line.startswith("- ") or line.startswith("* "):
+                    text = line[2:].strip()
+                    prefix = "✦ "
+                    color = (216, 204, 186)
+                    line_gap = 10
+                    indent = 30
+
+                clean = self._strip_inline_markdown(text)
+                wrapped = self._wrap_text_lines(measure_draw, clean, font, max_text_width - indent)
+                _, sample_h = self._measure_text(measure_draw, "塔罗", font)
+                line_height = max(sample_h + 10, 32)
+
+                for idx, wrapped_line in enumerate(wrapped):
+                    output = wrapped_line
+                    if prefix:
+                        output = (prefix if idx == 0 else "  ") + wrapped_line
+                    layout_items.append(
+                        {
+                            "kind": "text",
+                            "text": output,
+                            "font": font,
+                            "color": color,
+                            "height": line_height,
+                        }
+                    )
+                    content_height += line_height
+                content_height += line_gap
+
+            height = max(760, content_height + (outer_padding * 2) + (panel_padding * 2))
+
+            img = PIL.Image.new("RGB", (width, height), (14, 12, 28))
+            draw = PIL.ImageDraw.Draw(img)
+            for y in range(height):
+                ratio = y / max(1, height - 1)
+                r = int(14 + (30 - 14) * ratio)
+                g = int(12 + (22 - 12) * ratio)
+                b = int(28 + (45 - 28) * ratio)
+                draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+            panel = (outer_padding, outer_padding, width - outer_padding, height - outer_padding)
+            draw.rounded_rectangle(panel, radius=28, fill=(34, 27, 50), outline=(171, 134, 78), width=3)
+            inner = (panel[0] + 10, panel[1] + 10, panel[2] - 10, panel[3] - 10)
+            draw.rounded_rectangle(inner, radius=22, outline=(120, 97, 58), width=1)
+
+            deco_points = [
+                (outer_padding + 18, outer_padding + 18),
+                (width - outer_padding - 22, outer_padding + 18),
+                (outer_padding + 18, height - outer_padding - 22),
+                (width - outer_padding - 22, height - outer_padding - 22),
+            ]
+            for x, y in deco_points:
+                draw.ellipse((x, y, x + 6, y + 6), fill=(219, 178, 105))
+
+            x = outer_padding + panel_padding
+            y = outer_padding + panel_padding
+            for item in layout_items:
+                if item["kind"] == "space":
+                    y += item["height"]
+                    continue
+                if item["kind"] == "divider":
+                    y += 10
+                    draw.line((x, y, width - outer_padding - panel_padding, y), fill=(180, 145, 88), width=2)
+                    y += item["height"] - 10
+                    continue
+                draw.text((x, y), item["text"], font=item["font"], fill=item["color"])
+                y += item["height"]
+
             card_dir = self.data_dir / "analysis_cards"
             os.makedirs(card_dir, exist_ok=True)
             card_path = card_dir / f"reading_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
 
-            launch_kwargs: Dict[str, Any] = {"headless": True}
-            if os.name != "nt":
-                launch_kwargs["args"] = ["--no-sandbox", "--disable-setuid-sandbox"]
-
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(**launch_kwargs)
-                page = await browser.new_page()
-                await page.set_content(html, wait_until='networkidle')
-                await page.evaluate('document.fonts.ready')
-                
-                card_element = await page.query_selector('.card')
-                if card_element:
-                    await card_element.screenshot(path=str(card_path))
-                else:
-                    await page.screenshot(path=str(card_path), full_page=True)
-                await browser.close()
-
+            img.save(card_path, format="PNG")
             return str(card_path.resolve())
         except Exception as e:
-            error_text = str(e)
-            if "Executable doesn't exist" in error_text or "chromium_headless_shell" in error_text:
-                logger.warning(
-                    "Markdown Playwright 渲染降级：检测到未安装浏览器内核，已回退纯文本。请在部署环境执行 'python -m playwright install chromium'。错误: %s",
-                    error_text,
-                )
-                return None
-            logger.error("Markdown Playwright 渲染失败，已回退纯文本: %s", error_text)
+            logger.error("Markdown Pillow 渲染失败，已回退纯文本: %s", str(e))
             return None
 
     async def _append_record(self, record: Dict[str, Any]):
