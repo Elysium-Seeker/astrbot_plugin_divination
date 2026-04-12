@@ -329,13 +329,17 @@ class Tarot:
             os.makedirs(card_dir, exist_ok=True)
             card_path = card_dir / f"reading_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
 
+            launch_kwargs: Dict[str, Any] = {"headless": True}
+            if os.name != "nt":
+                launch_kwargs["args"] = ["--no-sandbox", "--disable-setuid-sandbox"]
+
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(**launch_kwargs)
                 page = await browser.new_page()
                 await page.set_content(html, wait_until='networkidle')
                 await page.evaluate('document.fonts.ready')
                 
-                card_element = await page.query_selector('.tarot-card')
+                card_element = await page.query_selector('.card')
                 if card_element:
                     await card_element.screenshot(path=str(card_path))
                 else:
@@ -344,8 +348,15 @@ class Tarot:
 
             return str(card_path.resolve())
         except Exception as e:
-            logger.error("Markdown Playwright 渲染失败: %s。可能是未安装浏览器，遇到此问题请运行 'playwright install chromium'", str(e))
-            raise e
+            error_text = str(e)
+            if "Executable doesn't exist" in error_text or "chromium_headless_shell" in error_text:
+                logger.warning(
+                    "Markdown Playwright 渲染降级：检测到未安装浏览器内核，已回退纯文本。请在部署环境执行 'python -m playwright install chromium'。错误: %s",
+                    error_text,
+                )
+                return None
+            logger.error("Markdown Playwright 渲染失败，已回退纯文本: %s", error_text)
+            return None
 
     async def _append_record(self, record: Dict[str, Any]):
         if not self.enable_record:
