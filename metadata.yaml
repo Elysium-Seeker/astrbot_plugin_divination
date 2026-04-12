@@ -1,6 +1,7 @@
-name: astrbot_plugin_tarot
-desc: "AstrBot 塔罗占卜插件：默认强制 BilibiliTarot，支持同题不重洗牌的两阶段追问与内置中文字体卡片渲染。"
-help: "[/tarot 问题] 多牌占卜；[/tarot] 仅返回提问引导；同一问题不建议重复抽牌；默认 force_theme=BilibiliTarot（可留空随机）；[塔罗牌 问题] 单张占卜；[抽牌 编号...] 抽牌命令（编号从 1 开始）；有待抽牌会话时可直接回复编号自动抽牌；纯数字被分流时可用 [/tarot 编号...] 兜底；整体解读渲染为 Markdown 卡片；默认使用内置 Noto 字体，可配置 markdown_card_font_path 覆盖；[追问 问题] 发起同题追问并进入说明牌抽取提示；[追问 编号...] 按提示选择说明牌（随机抽1或2张，不能与已抽编号重复）；追问时效 followup_expire_seconds；[占卜记录 数量] 查看历史；[开启/关闭群聊转发] 切换群聊转发模式。"
-version: v0.2.25
+name: astrbot_plugin_divination
+desc: "AstrBot 占卜插件：默认强制 BilibiliTarot 塔罗牌占卜，支持同题不重洗牌的深 度追问与内置字体卡片渲染。"
+help: "[/tarot 问题] 多牌阵；[/塔罗牌 问题] 单卡；[/抽牌 编号...]；[/追问 问题] 基于同题延伸追问；[/占卜记录]"
+version: v1.0.0
 author: Elysium-Seeker
-repo: https://github.com/Elysium-Seeker/astrbot_plugin_tarot
+repo: https://github.com/Elysium-Seeker/astrbot_plugin_divination
+

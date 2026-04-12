@@ -1369,15 +1369,15 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.25")
-class TarotPlugin(Star):
+@register("divination", "Elysium-Seeker", "赛博占卜插件", "1.0.0")
+class DivinationPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.tarot = Tarot(context, config)
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.25\n"
+            "赛博占卜 v1.0.0\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
