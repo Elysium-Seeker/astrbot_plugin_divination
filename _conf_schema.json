@@ -23,7 +23,7 @@
   "markdown_card_font_path": {
     "type": "string",
     "default": "",
-    "description": "Markdown 卡片字体路径（ttf/ttc，可选）。为空时自动探测系统字体"
+    "description": "Markdown 卡片字体路径（ttf/ttc/目录，可选）。为空时优先使用插件内置字体，其次探测系统字体"
   },
   "include_ai_in_chain": {
     "type": "bool",

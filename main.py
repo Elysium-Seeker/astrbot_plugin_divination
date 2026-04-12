@@ -200,6 +200,14 @@ class Tarot:
 
         local_font_dir = Path(__file__).parent / "resources" / "fonts"
         if local_font_dir.exists():
+            preferred_bundled = [
+                local_font_dir / "NotoSerifSC-VF.ttf",
+                local_font_dir / "NotoSansSC-VF.ttf",
+            ]
+            for font_file in preferred_bundled:
+                if font_file.exists():
+                    candidates.append(str(font_file))
+
             for pattern in ("*.ttf", "*.ttc", "*.otf"):
                 for font_file in sorted(local_font_dir.glob(pattern)):
                     candidates.append(str(font_file))
