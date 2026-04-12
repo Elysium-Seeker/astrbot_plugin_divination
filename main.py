@@ -27,6 +27,7 @@ class Tarot:
         self.is_chain_reply: bool = config.get("chain_reply", True)
         self.include_ai_in_chain: bool = config.get("include_ai_in_chain", True)
         self.pending_expire_seconds: int = int(config.get("pending_expire_seconds", 600))
+        self.followup_expire_seconds: int = int(config.get("followup_expire_seconds", 1800))
         self.enable_record: bool = config.get("enable_record", True)
         self.full_draw_pool: bool = config.get("full_draw_pool", True)
         self.draw_pool_factor: int = max(0, int(config.get("draw_pool_factor", 0)))
@@ -36,6 +37,7 @@ class Tarot:
         raw_card_font_path = config.get("markdown_card_font_path", "")
         self.markdown_card_font_path: str = str(raw_card_font_path).strip() if raw_card_font_path is not None else ""
         self.pending_sessions: Dict[str, Dict[str, Any]] = {}
+        self.followup_sessions: Dict[str, Dict[str, Any]] = {}
         self.record_lock = asyncio.Lock()
         self.data_dir: Path = self._resolve_data_dir(context)
         self.records_file: Path = self.data_dir / "divination_records.jsonl"
@@ -46,7 +48,7 @@ class Tarot:
             logger.error("tarot.json 文件缺失，请确保资源完整！")
             raise Exception("tarot.json 文件缺失，请确保资源完整！")
         logger.info(
-            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s, 强制主题: %s, Markdown 卡片: %s, 卡片字体: %s",
+            "Tarot 插件初始化完成，资源路径: %s, AI 解析加入转发: %s, 记录功能: %s, 全牌池: %s, 抽牌池倍率: %s, 强制主题: %s, Markdown 卡片: %s, 卡片字体: %s, 追问上下文过期: %ss",
             self.resource_path,
             self.include_ai_in_chain,
             self.enable_record,
@@ -55,6 +57,7 @@ class Tarot:
             self.force_theme or "<随机>",
             self.enable_markdown_card,
             self.markdown_card_font_path or "<自动探测>",
+            self.followup_expire_seconds,
         )
 
     def _resolve_data_dir(self, context: Context) -> Path:
@@ -110,6 +113,27 @@ class Tarot:
         ]
         for key in expired_keys:
             self.pending_sessions.pop(key, None)
+
+    def has_followup_session(self, event: AstrMessageEvent) -> bool:
+        self._cleanup_followup_sessions()
+        session_key = self._build_session_key(event)
+        session = self.followup_sessions.get(session_key)
+        if not session:
+            return False
+        if time.time() - session.get("created_at", 0) > self.followup_expire_seconds:
+            self.followup_sessions.pop(session_key, None)
+            return False
+        return True
+
+    def _cleanup_followup_sessions(self):
+        now = time.time()
+        expired_keys = [
+            key
+            for key, session in self.followup_sessions.items()
+            if now - session.get("created_at", now) > self.followup_expire_seconds
+        ]
+        for key in expired_keys:
+            self.followup_sessions.pop(key, None)
 
     def _normalize_question(self, user_input: str) -> str:
         question = re.sub(r"\s+", " ", user_input or "").strip()
@@ -656,6 +680,140 @@ class Tarot:
             logger.error(f"生成 AI 解析失败: {str(e)}")
             return "抱歉，AI 解析生成失败，请稍后再试。"
 
+    async def _generate_followup_interpretation(
+        self,
+        base_question: str,
+        formation_name: str,
+        cards: List[Dict[str, Any]],
+        latest_interpretation: str,
+        followup_question: str,
+        followup_history: List[Dict[str, Any]],
+    ) -> str:
+        cards_text = "\n".join(
+            f"- {card.get('position', '位置')}：{card.get('name', '未知牌')}{card.get('orientation', '')} · {card.get('meaning', '')}"
+            for card in cards
+        )
+        history_text = ""
+        if followup_history:
+            history_items = []
+            for item in followup_history[-3:]:
+                history_items.append(f"- 追问：{item.get('question', '')}\n  回答：{item.get('answer', '')}")
+            history_text = "\n".join(history_items)
+
+        prompt = (
+            "你是一位专业的塔罗牌占卜师。现在用户基于上一轮占卜继续追问。\n"
+            f"原始问题：{base_question}\n"
+            f"牌阵：{formation_name}\n"
+            f"牌面：\n{cards_text}\n\n"
+            f"上一轮解读摘要：\n{latest_interpretation}\n\n"
+        )
+        if history_text:
+            prompt += f"历史追问（最近 3 条）：\n{history_text}\n\n"
+        prompt += (
+            f"本次追问：{followup_question}\n\n"
+            "请在不改变牌面的前提下，结合上一轮解读做更聚焦的补充分析。"
+            "请用 Markdown 输出，结构至少包含：\n"
+            "## 追问结论\n"
+            "## 关键依据\n"
+            "## 可执行建议\n"
+            "每个小节 2-4 条要点，避免空泛表达。"
+        )
+
+        try:
+            llm_response = await self.context.get_using_provider().text_chat(
+                prompt=prompt,
+                session_id=None,
+                contexts=[],
+                image_urls=[],
+                system_prompt="你是一个专业的塔罗牌占卜师，擅长连续对话与追问分析。",
+            )
+            return llm_response.completion_text.strip()
+        except Exception as e:
+            logger.error("生成追问解析失败: %s", str(e))
+            return "抱歉，追问解析生成失败，请稍后再试。"
+
+    async def followup(self, event: AstrMessageEvent, user_input: str = ""):
+        try:
+            followup_question = self._normalize_question(user_input)
+            self._cleanup_followup_sessions()
+            session_key = self._build_session_key(event)
+            followup_session = self.followup_sessions.get(session_key)
+
+            if not followup_session:
+                yield event.plain_result("当前没有可追问的占卜上下文，请先完成一轮占卜后再追问。")
+                return
+
+            if time.time() - followup_session.get("created_at", 0) > self.followup_expire_seconds:
+                self.followup_sessions.pop(session_key, None)
+                yield event.plain_result("追问上下文已过期，请重新发起占卜。")
+                return
+
+            cards = followup_session.get("cards", [])
+            formation_name = followup_session.get("formation_name", "未知牌阵")
+            base_question = followup_session.get("question", "")
+            latest_interpretation = followup_session.get("latest_interpretation", "")
+            followup_history = followup_session.get("followups", [])
+
+            interpretation = await self._generate_followup_interpretation(
+                base_question=base_question,
+                formation_name=formation_name,
+                cards=cards,
+                latest_interpretation=latest_interpretation,
+                followup_question=followup_question,
+                followup_history=followup_history,
+            )
+
+            followup_markdown = self._build_interpretation_markdown(
+                question=f"{base_question}（追问：{followup_question}）",
+                formation_name=formation_name,
+                record_cards=cards,
+                interpretation=interpretation,
+            )
+            analysis_card_path = await self._render_markdown_card(followup_markdown)
+
+            if analysis_card_path:
+                yield event.chain_result(
+                    [
+                        Plain("\n“属于你的追问解读卡片（Markdown）”"),
+                        Image.fromFileSystem(analysis_card_path),
+                    ]
+                )
+            else:
+                yield event.plain_result(f"\n“属于你的追问解读！”\n{interpretation}")
+
+            followup_entry = {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "question": followup_question,
+                "answer": interpretation,
+            }
+            followup_history.append(followup_entry)
+            followup_session["followups"] = followup_history
+            followup_session["latest_interpretation"] = interpretation
+            followup_session["created_at"] = time.time()
+
+            await self._append_record(
+                {
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "session_key": session_key,
+                    "group_id": self._safe_event_call(event, "get_group_id"),
+                    "user_id": self._safe_event_call(event, "get_sender_id")
+                    or self._safe_event_call(event, "get_user_id")
+                    or "unknown-user",
+                    "question": base_question,
+                    "followup_question": followup_question,
+                    "theme": followup_session.get("theme", ""),
+                    "formation": formation_name,
+                    "selected_numbers": followup_session.get("selected_numbers", []),
+                    "cards": cards,
+                    "overall_interpretation": interpretation,
+                    "overall_interpretation_markdown": followup_markdown,
+                    "is_followup": True,
+                }
+            )
+        except Exception as e:
+            logger.error("追问流程失败: %s", str(e))
+            yield event.plain_result(f"追问失败: {str(e)}")
+
     async def _create_pending_session(self, event: AstrMessageEvent, user_input: str, is_single: bool):
         self._cleanup_pending_sessions()
         question = self._normalize_question(user_input)
@@ -871,6 +1029,18 @@ class Tarot:
             else:
                 yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
 
+        self.followup_sessions[session["session_key"]] = {
+            "created_at": time.time(),
+            "session_key": session["session_key"],
+            "question": question,
+            "theme": theme,
+            "formation_name": formation_name,
+            "selected_numbers": selected_numbers,
+            "cards": record_cards,
+            "latest_interpretation": interpretation,
+            "followups": [],
+        }
+
         await self._append_record(
             {
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -979,7 +1149,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.15")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.23")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -987,7 +1157,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.15\n"
+            "赛博塔罗牌 v0.2.23\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
@@ -995,7 +1165,8 @@ class TarotPlugin(Star):
             "[编号规则] 编号从 1 开始，不存在 0 号牌\n"
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
             "[分析输出] 整体解读将渲染为 Markdown 风格占卜卡片\n"
-            "[乱码修复] 可设置 markdown_card_font_path 指向中文字体；若无可用字体将自动回退纯文本\n"
+            "[字体策略] 默认内置 Noto 中文字体，可设置 markdown_card_font_path 覆盖\n"
+            "[/追问 问题] 基于最近一轮占卜继续追问（默认 30 分钟内有效）\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
@@ -1092,6 +1263,20 @@ class TarotPlugin(Star):
         except Exception as e:
             logger.error("处理抽牌命令失败: %s", str(e))
             yield event.plain_result(f"抽牌命令执行失败: {str(e)}")
+
+    @command("追问")
+    async def followup_handler(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            followup_text = (text or "").strip()
+            if not followup_text:
+                yield event.plain_result("请输入追问内容。示例：/追问 我接下来三个月该怎么做？")
+            else:
+                async for result in self.tarot.followup(event, followup_text):
+                    yield result
+            event.stop_event()
+        except Exception as e:
+            logger.error("处理追问命令失败: %s", str(e))
+            yield event.plain_result(f"追问命令执行失败: {str(e)}")
 
     @filter.regex(r"^\s*\d+(?:[\s,，]+\d+)*\s*$")
     async def draw_by_reply_handler(self, event: AstrMessageEvent, text: str = ""):

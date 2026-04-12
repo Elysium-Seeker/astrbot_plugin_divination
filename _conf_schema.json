@@ -35,6 +35,11 @@
     "default": 600,
     "description": "待抽牌会话超时时间（秒）"
   },
+  "followup_expire_seconds": {
+    "type": "int",
+    "default": 1800,
+    "description": "追问上下文超时时间（秒）"
+  },
   "full_draw_pool": {
     "type": "bool",
     "default": true,
