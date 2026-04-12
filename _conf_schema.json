@@ -38,7 +38,7 @@
   "followup_expire_seconds": {
     "type": "int",
     "default": 1800,
-    "description": "追问上下文超时时间（秒）"
+    "description": "同题追问/补牌上下文超时时间（秒）"
   },
   "full_draw_pool": {
     "type": "bool",

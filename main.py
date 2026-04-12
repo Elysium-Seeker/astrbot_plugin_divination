@@ -135,6 +135,39 @@ class Tarot:
         for key in expired_keys:
             self.followup_sessions.pop(key, None)
 
+    @staticmethod
+    def _normalize_compare_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text or "").strip().lower()
+
+    def get_followup_session(self, event: AstrMessageEvent) -> Optional[Dict[str, Any]]:
+        self._cleanup_followup_sessions()
+        session_key = self._build_session_key(event)
+        session = self.followup_sessions.get(session_key)
+        if not session:
+            return None
+        if time.time() - session.get("created_at", 0) > self.followup_expire_seconds:
+            self.followup_sessions.pop(session_key, None)
+            return None
+        return session
+
+    def get_same_question_redraw_hint(self, event: AstrMessageEvent, question: str) -> Optional[str]:
+        session = self.get_followup_session(event)
+        if not session:
+            return None
+        new_q = self._normalize_compare_text(question)
+        old_q = self._normalize_compare_text(session.get("question", ""))
+        if not new_q or not old_q:
+            return None
+        if new_q != old_q:
+            return None
+        return (
+            "这是同一个问题，建议不要重复抽牌。\n"
+            "你现在更适合：\n"
+            "1) /追问 你的问题（基于原牌深挖）\n"
+            "2) /补牌 牌位编号 [1或2] 追问内容（针对某张牌补充说明）\n"
+            "如果是全新问题，再用 /tarot 发起新占卜。"
+        )
+
     def _normalize_question(self, user_input: str) -> str:
         question = re.sub(r"\s+", " ", user_input or "").strip()
         return question or "我当前最需要关注什么？"
@@ -680,6 +713,22 @@ class Tarot:
             logger.error(f"生成 AI 解析失败: {str(e)}")
             return "抱歉，AI 解析生成失败，请稍后再试。"
 
+    @staticmethod
+    def _card_identity(card: Dict[str, Any]) -> str:
+        return f"{card.get('type', '')}:{card.get('pic', '')}:{card.get('name_cn', '')}"
+
+    def _draw_supplement_cards(self, followup_session: Dict[str, Any], count: int) -> List[Dict[str, Any]]:
+        remaining_cards: List[Dict[str, Any]] = list(followup_session.get("remaining_cards", []))
+        if len(remaining_cards) < count:
+            return []
+
+        picked = random.sample(remaining_cards, count)
+        picked_ids = {self._card_identity(card) for card in picked}
+        followup_session["remaining_cards"] = [
+            card for card in remaining_cards if self._card_identity(card) not in picked_ids
+        ]
+        return picked
+
     async def _generate_followup_interpretation(
         self,
         base_question: str,
@@ -688,11 +737,20 @@ class Tarot:
         latest_interpretation: str,
         followup_question: str,
         followup_history: List[Dict[str, Any]],
+        target_card: Optional[Dict[str, Any]] = None,
+        supplement_cards: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         cards_text = "\n".join(
             f"- {card.get('position', '位置')}：{card.get('name', '未知牌')}{card.get('orientation', '')} · {card.get('meaning', '')}"
             for card in cards
         )
+        supplement_cards = supplement_cards or []
+        supplement_text = ""
+        if supplement_cards:
+            supplement_text = "\n".join(
+                f"- {card.get('position', '补充牌')}：{card.get('name', '未知牌')}{card.get('orientation', '')} · {card.get('meaning', '')}"
+                for card in supplement_cards
+            )
         history_text = ""
         if followup_history:
             history_items = []
@@ -707,6 +765,15 @@ class Tarot:
             f"牌面：\n{cards_text}\n\n"
             f"上一轮解读摘要：\n{latest_interpretation}\n\n"
         )
+        if target_card and supplement_cards:
+            prompt += (
+                f"本次为针对牌位「{target_card.get('position', '位置')}」的补充追问。\n"
+                f"该牌：{target_card.get('name', '未知牌')}{target_card.get('orientation', '')} · {target_card.get('meaning', '')}\n"
+                f"补充牌：\n{supplement_text}\n\n"
+                "请把补充牌放在目标牌旁边联合解读，不要孤立分析补充牌。\n\n"
+            )
+        else:
+            prompt += "本次不抽新牌，仅基于原牌进行深入追问解读。\n\n"
         if history_text:
             prompt += f"历史追问（最近 3 条）：\n{history_text}\n\n"
         prompt += (
@@ -732,7 +799,13 @@ class Tarot:
             logger.error("生成追问解析失败: %s", str(e))
             return "抱歉，追问解析生成失败，请稍后再试。"
 
-    async def followup(self, event: AstrMessageEvent, user_input: str = ""):
+    async def followup(
+        self,
+        event: AstrMessageEvent,
+        user_input: str = "",
+        target_index: Optional[int] = None,
+        supplement_count: int = 0,
+    ):
         try:
             followup_question = self._normalize_question(user_input)
             self._cleanup_followup_sessions()
@@ -753,6 +826,64 @@ class Tarot:
             base_question = followup_session.get("question", "")
             latest_interpretation = followup_session.get("latest_interpretation", "")
             followup_history = followup_session.get("followups", [])
+            theme = followup_session.get("theme", "")
+
+            if not cards:
+                yield event.plain_result("当前追问上下文缺少牌面信息，请重新发起占卜。")
+                return
+
+            if target_index is not None and (target_index < 0 or target_index >= len(cards)):
+                yield event.plain_result(f"牌位编号超出范围，请在 1-{len(cards)} 之间选择。")
+                return
+
+            if supplement_count < 0:
+                yield event.plain_result("补充牌数量不能为负数。")
+                return
+            if supplement_count > 2:
+                yield event.plain_result("单次追问最多补充抽 2 张牌。")
+                return
+
+            target_card = cards[target_index] if target_index is not None else None
+            supplement_cards: List[Dict[str, Any]] = []
+            if supplement_count > 0:
+                if target_card is None:
+                    yield event.plain_result("补充抽牌需要先指定牌位编号。示例：/补牌 2 1 为什么会这样？")
+                    return
+
+                remain_count = len(followup_session.get("remaining_cards", []))
+                if remain_count < supplement_count:
+                    yield event.plain_result(
+                        f"剩余可补充的牌不足，当前仅剩 {remain_count} 张，无法抽取 {supplement_count} 张。"
+                    )
+                    return
+
+                drawn_cards = self._draw_supplement_cards(followup_session, supplement_count)
+                if len(drawn_cards) != supplement_count:
+                    yield event.plain_result("补充抽牌失败，请稍后重试。")
+                    return
+
+                yield event.plain_result(
+                    f"本次追问将针对第{target_index + 1}张牌「{target_card.get('position', '位置')}」补充抽 {supplement_count} 张说明牌（不重抽整副牌）。"
+                )
+
+                for idx, card_info in enumerate(drawn_cards, start=1):
+                    flag, text, img_path, is_upright = await self._get_text_and_image(theme, card_info)
+                    if not flag:
+                        yield event.plain_result(text)
+                        return
+                    supplement_card = {
+                        "position": f"补充牌{idx}（对应{target_card.get('position', '位置')}）",
+                        "name": card_info.get("name_cn", "未知牌"),
+                        "orientation": "正位" if is_upright else "逆位",
+                        "meaning": card_info.get("meaning", {}).get("up" if is_upright else "down", ""),
+                    }
+                    supplement_cards.append(supplement_card)
+                    yield event.chain_result(
+                        [
+                            Plain(f"补充牌{idx}（对应{target_card.get('position', '位置')}）\n{text}"),
+                            Image.fromFileSystem(img_path),
+                        ]
+                    )
 
             interpretation = await self._generate_followup_interpretation(
                 base_question=base_question,
@@ -761,12 +892,14 @@ class Tarot:
                 latest_interpretation=latest_interpretation,
                 followup_question=followup_question,
                 followup_history=followup_history,
+                target_card=target_card,
+                supplement_cards=supplement_cards,
             )
 
             followup_markdown = self._build_interpretation_markdown(
                 question=f"{base_question}（追问：{followup_question}）",
                 formation_name=formation_name,
-                record_cards=cards,
+                record_cards=cards + supplement_cards,
                 interpretation=interpretation,
             )
             analysis_card_path = await self._render_markdown_card(followup_markdown)
@@ -785,11 +918,16 @@ class Tarot:
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 "question": followup_question,
                 "answer": interpretation,
+                "target_position": target_card.get("position", "") if target_card else "",
+                "supplement_cards": supplement_cards,
             }
             followup_history.append(followup_entry)
             followup_session["followups"] = followup_history
             followup_session["latest_interpretation"] = interpretation
             followup_session["created_at"] = time.time()
+            if supplement_cards:
+                existing_supplement = followup_session.get("supplement_cards", [])
+                followup_session["supplement_cards"] = existing_supplement + supplement_cards
 
             await self._append_record(
                 {
@@ -804,10 +942,12 @@ class Tarot:
                     "theme": followup_session.get("theme", ""),
                     "formation": formation_name,
                     "selected_numbers": followup_session.get("selected_numbers", []),
-                    "cards": cards,
+                    "cards": cards + supplement_cards,
                     "overall_interpretation": interpretation,
                     "overall_interpretation_markdown": followup_markdown,
                     "is_followup": True,
+                    "target_position": target_card.get("position", "") if target_card else "",
+                    "supplement_cards": supplement_cards,
                 }
             )
         except Exception as e:
@@ -1029,6 +1169,13 @@ class Tarot:
             else:
                 yield event.plain_result(f"\n“属于你的占卜分析！”\n{interpretation}")
 
+        yield event.plain_result(
+            "同一问题建议不要重复抽牌。\n"
+            "- 深挖当前结果：/追问 你的问题\n"
+            "- 针对某张牌补充抽牌：/补牌 牌位编号 1或2 追问内容\n"
+            "- 若是全新问题，再重新发起 /tarot"
+        )
+
         self.followup_sessions[session["session_key"]] = {
             "created_at": time.time(),
             "session_key": session["session_key"],
@@ -1037,8 +1184,14 @@ class Tarot:
             "formation_name": formation_name,
             "selected_numbers": selected_numbers,
             "cards": record_cards,
+            "remaining_cards": [
+                card
+                for idx, card in enumerate(session.get("draw_pool", []), start=1)
+                if idx not in set(selected_numbers)
+            ],
             "latest_interpretation": interpretation,
             "followups": [],
+            "supplement_cards": [],
         }
 
         await self._append_record(
@@ -1149,7 +1302,7 @@ class Tarot:
         logger.info(f"群聊转发模式已切换为: {new_state}")
         return "占卜群聊转发模式已开启~" if new_state else "占卜群聊转发模式已关闭~"
 
-@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.23")
+@register("tarot", "Elysium-Seeker", "赛博塔罗牌占卜插件", "0.2.24")
 class TarotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1157,7 +1310,7 @@ class TarotPlugin(Star):
 
     def _help_message(self) -> str:
         return (
-            "赛博塔罗牌 v0.2.23\n"
+            "赛博塔罗牌 v0.2.24\n"
             "[/tarot 问题] 进入多牌占卜流程，先洗牌选阵，再输入编号抽牌\n"
             "[/tarot] 不带问题时会引导你先提问\n"
             "[主题选择] 默认强制使用 BilibiliTarot（可通过 force_theme 配置）\n"
@@ -1166,7 +1319,9 @@ class TarotPlugin(Star):
             "[抽牌池配置] full_draw_pool=true 时始终全牌池\n"
             "[分析输出] 整体解读将渲染为 Markdown 风格占卜卡片\n"
             "[字体策略] 默认内置 Noto 中文字体，可设置 markdown_card_font_path 覆盖\n"
-            "[/追问 问题] 基于最近一轮占卜继续追问（默认 30 分钟内有效）\n"
+            "[核心原则] 同一问题不重复抽牌，先追问再考虑重抽\n"
+            "[/追问 问题] 基于最近一轮占卜继续深挖，不新增抽牌（默认 30 分钟内有效）\n"
+            "[/补牌 牌位编号 1或2 追问内容] 针对某张牌从剩余牌中补抽 1-2 张说明牌\n"
             "[自动抽牌] 有待抽牌会话时，直接回复编号（如 1 5 9）即可\n"
             "[命令兜底] 若平台拦截纯数字消息，可用 /tarot 1 5 9 直接抽牌\n"
             "[塔罗牌 问题] 进入单张抽牌流程\n"
@@ -1209,6 +1364,32 @@ class TarotPlugin(Star):
 
         return ""
 
+    @staticmethod
+    def _parse_supplement_command(text: str) -> Tuple[Optional[int], int, str, Optional[str]]:
+        raw = (text or "").strip()
+        if not raw:
+            return None, 1, "", "请输入补牌参数。示例：/补牌 2 1 这张牌想告诉我什么？"
+
+        parts = re.split(r"\s+", raw)
+        if not parts[0].isdigit():
+            return None, 1, "", "补牌命令格式：/补牌 牌位编号 [1或2] 追问内容。"
+
+        target_index = int(parts[0]) - 1
+        supplement_count = 1
+        question_start = 1
+
+        if len(parts) > 1:
+            m = re.fullmatch(r"(?:x|X|×)?([0-9]+)", parts[1])
+            if m:
+                supplement_count = int(m.group(1))
+                question_start = 2
+
+        followup_question = " ".join(parts[question_start:]).strip()
+        if not followup_question:
+            followup_question = "这张牌想告诉我什么更深的信息？"
+
+        return target_index, supplement_count, followup_question, None
+
     @command("tarot")
     async def tarot_handler(self, event: AstrMessageEvent, text: str = ""):
         try:
@@ -1234,6 +1415,11 @@ class TarotPlugin(Star):
             elif user_text in {"帮助", "help", "Help", "HELP"}:
                 yield event.plain_result(self._help_message())
             else:
+                same_question_hint = self.tarot.get_same_question_redraw_hint(event, user_text)
+                if same_question_hint:
+                    yield event.plain_result(same_question_hint)
+                    event.stop_event()
+                    return
                 async for result in self.tarot.divine(event, user_text):
                     yield result
             event.stop_event()
@@ -1244,10 +1430,16 @@ class TarotPlugin(Star):
     @command("塔罗牌")
     async def onetime_divine_handler(self, event: AstrMessageEvent, text: str = ""):
         try:
-            if (text or "").strip() in {"帮助", "help", "Help", "HELP"}:
+            user_text = (text or "").strip()
+            if user_text in {"帮助", "help", "Help", "HELP"}:
                 yield event.plain_result(self._help_message())
             else:
-                async for result in self.tarot.onetime_divine(event, text):
+                same_question_hint = self.tarot.get_same_question_redraw_hint(event, user_text)
+                if same_question_hint:
+                    yield event.plain_result(same_question_hint)
+                    event.stop_event()
+                    return
+                async for result in self.tarot.onetime_divine(event, user_text):
                     yield result
             event.stop_event()
         except Exception as e:
@@ -1277,6 +1469,39 @@ class TarotPlugin(Star):
         except Exception as e:
             logger.error("处理追问命令失败: %s", str(e))
             yield event.plain_result(f"追问命令执行失败: {str(e)}")
+
+    @command("补牌")
+    async def supplement_handler(self, event: AstrMessageEvent, text: str = ""):
+        try:
+            target_index, supplement_count, followup_question, err = self._parse_supplement_command(text)
+            if err:
+                yield event.plain_result(err)
+                event.stop_event()
+                return
+
+            session = self.tarot.get_followup_session(event)
+            if not session:
+                yield event.plain_result("当前没有可补牌的占卜上下文，请先完成一轮占卜。")
+                event.stop_event()
+                return
+
+            cards = session.get("cards", [])
+            if target_index is None or target_index < 0 or target_index >= len(cards):
+                yield event.plain_result(f"牌位编号超出范围，请在 1-{len(cards)} 之间选择。")
+                event.stop_event()
+                return
+
+            async for result in self.tarot.followup(
+                event,
+                followup_question,
+                target_index=target_index,
+                supplement_count=supplement_count,
+            ):
+                yield result
+            event.stop_event()
+        except Exception as e:
+            logger.error("处理补牌命令失败: %s", str(e))
+            yield event.plain_result(f"补牌命令执行失败: {str(e)}")
 
     @filter.regex(r"^\s*\d+(?:[\s,，]+\d+)*\s*$")
     async def draw_by_reply_handler(self, event: AstrMessageEvent, text: str = ""):
