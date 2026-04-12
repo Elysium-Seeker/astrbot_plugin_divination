@@ -183,6 +183,12 @@ class Tarot:
         numbers = [str(i) for i in range(1, pool_size + 1)]
         return "\n".join(" ".join(numbers[i:i + 10]) for i in range(0, len(numbers), 10))
 
+    @staticmethod
+    def _normalize_markdown_text(text: str) -> str:
+        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        normalized = "".join(ch for ch in normalized if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+        return normalized.strip()
+
     def _build_interpretation_markdown(
         self,
         question: str,
@@ -340,132 +346,6 @@ class Tarot:
         except Exception as e:
             logger.error("Markdown Playwright 渲染失败: %s。可能是未安装浏览器，遇到此问题请运行 'playwright install chromium'", str(e))
             raise e
-
-            markdown_text = self._normalize_markdown_text(markdown_text)
-            if not markdown_text:
-                return None
-
-            width = 1080
-            outer_padding = 36
-            panel_padding = 40
-            max_text_width = width - (outer_padding * 2) - (panel_padding * 2)
-
-            font_h1 = self._load_font(46, bold=True)
-            font_h2 = self._load_font(34, bold=True)
-            font_body = self._load_font(28, bold=False)
-            font_meta = self._load_font(24, bold=False)
-
-            if not all([font_h1, font_h2, font_body, font_meta]):
-                logger.warning(
-                    "Markdown 占卜卡片渲染跳过：未找到可用中文字体。可配置 markdown_card_font_path 指向 ttf/ttc 字体文件。"
-                )
-                return None
-
-            measure = PIL.Image.new("RGB", (width, 16), (0, 0, 0))
-            measure_draw = PIL.ImageDraw.Draw(measure)
-
-            layout_items: List[Dict[str, Any]] = []
-            content_height = 0
-            for raw in markdown_text.splitlines():
-                line = raw.strip()
-                if not line:
-                    content_height += 12
-                    layout_items.append({"kind": "blank", "height": 12})
-                    continue
-
-                if line == "---":
-                    content_height += 26
-                    layout_items.append({"kind": "divider", "height": 26})
-                    continue
-
-                prefix = ""
-                font = font_body
-                color = (58, 46, 28)
-                line_gap = 12
-                text = line
-                if line.startswith("# "):
-                    text = line[2:].strip()
-                    font = font_h1
-                    color = (75, 45, 12)
-                    line_gap = 18
-                elif line.startswith("## "):
-                    text = line[3:].strip()
-                    font = font_h2
-                    color = (92, 56, 18)
-                    line_gap = 14
-                elif line.startswith("- "):
-                    text = line[2:].strip()
-                    prefix = "• "
-                    font = font_meta
-                    color = (64, 52, 32)
-
-                clean_text = self._strip_inline_markdown(text)
-                wrapped = self._wrap_text_lines(
-                    measure_draw,
-                    clean_text,
-                    font,
-                    max_text_width - (20 if prefix else 0),
-                )
-                line_height = max(getattr(font, "size", 24) + 8, 28)
-                for idx, wrapped_line in enumerate(wrapped):
-                    output = (prefix if idx == 0 else "  ") + wrapped_line if prefix else wrapped_line
-                    content_height += line_height
-                    layout_items.append(
-                        {
-                            "kind": "text",
-                            "text": output,
-                            "font": font,
-                            "color": color,
-                            "height": line_height,
-                        }
-                    )
-                content_height += line_gap
-
-            height = max(720, content_height + (outer_padding * 2) + (panel_padding * 2))
-
-            img = PIL.Image.new("RGB", (width, height), (20, 22, 38))
-            draw = PIL.ImageDraw.Draw(img)
-            for y in range(height):
-                ratio = y / max(1, height - 1)
-                r = int(20 + (44 - 20) * ratio)
-                g = int(22 + (30 - 22) * ratio)
-                b = int(38 + (60 - 38) * ratio)
-                draw.line([(0, y), (width, y)], fill=(r, g, b))
-
-            panel = (outer_padding, outer_padding, width - outer_padding, height - outer_padding)
-            draw.rounded_rectangle(panel, radius=28, fill=(247, 240, 224), outline=(204, 170, 120), width=3)
-
-            star_points = [
-                (outer_padding + 18, outer_padding + 18),
-                (width - outer_padding - 24, outer_padding + 18),
-                (outer_padding + 18, height - outer_padding - 24),
-                (width - outer_padding - 24, height - outer_padding - 24),
-            ]
-            for x, y in star_points:
-                draw.ellipse((x, y, x + 6, y + 6), fill=(219, 183, 118))
-
-            x = outer_padding + panel_padding
-            y = outer_padding + panel_padding
-            for item in layout_items:
-                if item["kind"] == "blank":
-                    y += item["height"]
-                    continue
-                if item["kind"] == "divider":
-                    y += 8
-                    draw.line((x, y, width - outer_padding - panel_padding, y), fill=(190, 158, 112), width=2)
-                    y += item["height"] - 8
-                    continue
-                draw.text((x, y), item["text"], font=item["font"], fill=item["color"])
-                y += item["height"]
-
-            card_dir = self.data_dir / "analysis_cards"
-            os.makedirs(card_dir, exist_ok=True)
-            card_path = card_dir / f"reading_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
-            img.save(card_path, format="PNG")
-            return str(card_path.resolve())
-        except Exception as e:
-            logger.error("Markdown 占卜卡片渲染失败: %s", str(e))
-            return None
 
     async def _append_record(self, record: Dict[str, Any]):
         if not self.enable_record:
