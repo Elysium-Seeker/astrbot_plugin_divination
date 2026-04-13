@@ -1,7 +1,7 @@
 name: astrbot_plugin_divination
 desc: "AstrBot 占卜插件：默认强制 BilibiliTarot 塔罗牌占卜，支持同题不重洗牌的深 度追问与内置字体卡片渲染。"
 help: "[/tarot 问题] 多牌阵；[/塔罗牌 问题] 单卡；[/抽牌 编号...]；[/追问 问题] 基于同题延伸追问；[/占卜记录]"
-version: v1.0.1
+version: v1.0.2
 author: Elysium-Seeker
 repo: https://github.com/Elysium-Seeker/astrbot_plugin_divination
 
